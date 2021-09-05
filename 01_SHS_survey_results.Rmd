@@ -1,0 +1,458 @@
+---
+title: "SHS survey results"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+QUESTION: Where and when are SHS in Apra Harbor?
+
+AIMS: Analyse and plot SHS eDNA detections in Blue Hole, Inner Harbor, Middle Shoals, Orote Point and Sasa Bay over the period of Feb 2019 to July 2020. 
+
+```{r setup, include=FALSE}
+current_directory <- dirname(rstudioapi::getActiveDocumentContext()$path)
+knitr::opts_knit$set(root.dir=normalizePath(paste(current_directory)))
+```
+
+```{r load_libraries, warning=FALSE, message=FALSE}
+## LOAD LIBRARIES ----
+library(zoo) ## as.yearmon
+library(ggmap) ## maps
+library(ggsn) ## scale bar
+library(viridis) ## colour blind friendly colour scale
+library(ggspatial) ## north arrow
+library(mgcv) ## GAM
+library(gratia) ## as above
+library(mgcViz) ## gam diagnostics
+library(ggpubr) ## ggarrange
+library(tidyverse) ## load last
+```
+
+
+```{r SHS_survey_data, warning = FALSE, message = FALSE}
+## IMPORT SHS SURVEY DATA ----
+
+## colour scheme
+# scales::show_col(viridis(5))
+# scales::show_col(viridis(5, alpha=.8))
+# scales::show_col(viridis(4, alpha=.8, option="B"))
+
+## import qPCR results (as confirmed by sanger sequencing)
+SHS_data_unmod <- read.csv("docs/00.1_confirmed_detection_data.csv")
+
+## import field sample data (including eDNA concentration)
+SHS_field_sample_data_unmod <- read.csv("docs/00.2_field_sample_data.csv")
+
+## CALCULATE PROPORTIONS ----
+
+## calculate the proportion of technical replicates amplified per biological replicate (eDNA sample)
+## and the proportion of biological replicates (eDNA samples) amplified per site
+SHS_data<-SHS_data_unmod %>%
+  ## group by month, site and sample
+  group_by(field_collection_month, site, sample) %>% 
+  ## add a column containing the tech rep number 
+  mutate(tech_rep_no = row_number()) %>%
+  ## add an unweighted tally of the number of rows per sample
+  ## i.e. the number of tech reps run per sample
+  add_tally(name="no_tech_reps_run_per_sample") %>% 
+  ## add a weighted tally of the number of rows with a positive result
+  ## i.e. the number of tech reps amplified per sample
+  add_tally(name="no_tech_reps_ampd_per_sample", wt=positive) %>% 
+  ## calculate the  prop of tech reps amplified per sample
+  mutate(prop_tech_reps_ampd_per_sample = 
+           1/no_tech_reps_run_per_sample*no_tech_reps_ampd_per_sample) %>%
+  ## calculate the same information for biological replicates
+  left_join(., SHS_data_unmod %>%
+              ## select only necessary information
+              select(sample, field_collection_month, site, positive) %>%
+              ## filter out blanks
+              filter(!grepl('E', sample)) %>%
+              ## retain only unique rows (removes rows where more than 1 tech rep amp'd)
+              unique(.) %>%
+              ## group by month and site
+              group_by(field_collection_month, site) %>%
+              ## add a weighted tally of the number of rows per month/site w positive results
+              ## i.e. the number of biological reps amplified per sample
+              add_tally(name="no_bio_reps_ampd_per_site", wt=positive) %>%
+              ## remove positive column (because it differs between bio reps)
+              select(-positive) %>%
+              ## retain only unique rows (removes rows where info differs within sample)
+              unique(.) %>%
+              ## add an unweighted tally of the number of rows per site
+              ## i.e. the number of biological reps collected per site
+              add_tally(name="no_bio_reps_collected_per_site") %>%
+              ## calculate the prop of biological reps amplified per site
+              mutate(prop_bio_reps_ampd_per_site =
+                       1/no_bio_reps_collected_per_site*no_bio_reps_ampd_per_site),
+            ## specify columns to join by
+            by = c("sample", "field_collection_month", "site")) 
+
+## MERGE DETECTIONS AND SAMPLE DATA AND ADD TIME OF YEAR INFO ----
+SHS_data_full <- left_join(SHS_data, SHS_field_sample_data_unmod, 
+                           by = c("sample", "field_collection_month", "site"="site_name")) %>%
+  ## rename dat column
+  rename(date_collected=date) %>%
+  ## ungroup data
+  ungroup(.) %>%
+  ## format field collection month column
+  mutate(field_collection_month = as.yearmon(field_collection_month)) %>%
+  ## arrange rows by field collection month column values
+  arrange(., field_collection_month) %>%
+  ## add and format extra date information columns
+  mutate(fc_month_factor = fct_inorder(factor(field_collection_month)),
+         fc_month_number = as.numeric(factor(field_collection_month)),
+         calendar_month = format(as.yearmon(field_collection_month), "%B"),
+         calendar_month_number = as.numeric(format(field_collection_month, "%m")),
+         fc_month_number_cyclic = ifelse(calendar_month_number > 2,
+                                    calendar_month_number-2,
+                                    calendar_month_number+10),
+         ## add seasons to data frame (dry = December to May, wet = June to November)
+         season = ifelse(grepl("Dec", field_collection_month), "wet", 
+                         ## Dec = transitional month
+                    ifelse(grepl("Jan", field_collection_month), "dry",
+                      ifelse(grepl("Feb", field_collection_month), "dry",
+                        ifelse(grepl("Mar", field_collection_month), "dry",
+                          ifelse(grepl("Apr", field_collection_month), "dry",
+                            ifelse(grepl("May", field_collection_month), "dry",
+                              ifelse(grepl("Jun", field_collection_month), "dry", 
+                                     ## Jun = transitional month
+                                ifelse(grepl("Jul", field_collection_month), "wet",
+                                  ifelse(grepl("Aug", field_collection_month), "wet",
+                                    ifelse(grepl("Sep", field_collection_month), "wet",
+                                      ifelse(grepl("Oct", field_collection_month), "wet",
+                                ifelse(grepl("Nov", field_collection_month), "wet",
+                                                 "None")))))))))))),
+         season_factor = factor(season)) %>%
+  ## arrange data by calendar month number
+  arrange(., calendar_month_number) %>%
+  ## reorder factor levels by first appearance
+  mutate(calendar_month_factor = fct_inorder(factor(calendar_month))) %>%
+  ## rename "positive" column to indicate tech rep was positive
+  rename(positive_tech = positive) %>%
+  ## add a positive bio column to indicate bio rep is considered positive
+  mutate(positive_bio = ifelse(no_tech_reps_ampd_per_sample > 0, 1, 0)) %>%
+  ## start mid year
+  mutate(calendar_month_factor_mid = factor(calendar_month_factor, 
+                                        levels = c("July", "August", "September",
+                                                   "October", "November", "December",
+                                                   "January" , "February", "March",
+                                                   "April", "May", "June")))
+
+## export it
+write.csv(SHS_data_full, "docs/01.0_SHS_data_full.csv", row.names = FALSE)
+
+## extract all points (where recorded) for filter sample each site/month
+sampling_points<-SHS_field_sample_data_unmod %>%
+  filter(latitude!="NA" | longitude!="NA") %>% 
+  filter(latitude<13.48) %>% # blue hole point not at blue hole
+  mutate(field_collection_month=as.yearmon(field_collection_month)) %>%
+  select(site_name, field_collection_month, sample_no, latitude, longitude)
+
+## extract points for first filter sample each site/month
+first_sampling_points <- sampling_points %>%
+  filter(., sample_no == "1") # retain only first sample (and GPS point for that sample)
+
+## export them 
+write.csv(sampling_points, "docs/01.1_sampling_points.csv", row.names = FALSE)
+write.csv(first_sampling_points , "docs/01.2_first_sampling_points.csv", row.names = FALSE)
+```
+
+```{r SHS_survey_maps, warning = FALSE, message = FALSE, fig.width = 12, figure.height = 20}
+## IMPORT LIBRARIES AND MAP DATA ----
+
+## provide ggmap with your key
+# register_google(key = "[your key here]") 
+
+## create data frame for site locations
+SHS_sites <- cbind.data.frame(site=c("Inner Harbor", "Sasa Bay", "Middle Shoals", 
+                                     "Orote Point", "Blue Hole"), 
+                              m_latitude=c(13.43181, 13.44769, 13.44959, 
+                                         13.44947, 13.43627),
+                              m_longitude=c(144.67573, 144.67537, 144.65729, 
+                                          144.62466, 144.62741))
+
+## FORMAT SHS SURVEY DATA FOR MAP ----
+
+## create data frame with site-level detection data (relevant to map) only
+SHS_figure_map_data <- SHS_data_full %>%
+  ## add site locations to full data set
+  left_join(., SHS_sites, by="site") %>%
+  ## retain only information related to biological replicates (samples)
+  select(field_collection_month, date_collected,
+         site, m_latitude, m_longitude, calendar_month_factor,
+         calendar_month_factor_mid, calendar_month_number,
+         sample_less, prop_bio_reps_ampd_per_site, 
+         no_bio_reps_ampd_per_site, season) %>%
+  ## filter out blanks
+  filter(!grepl('E', sample_less)) %>%
+  ## keep only unique rows (remove tech rep info)
+  unique(.) %>%
+  ## group by month and site
+  group_by(calendar_month_factor, site) %>%
+  ## calculate mean proportion of biological replicates amplified 
+  ## (because we sampled May and July of 2019 an 2020)
+  mutate(mean_prop_bio_amps = mean(prop_bio_reps_ampd_per_site), 
+         mean_no_bio_amps = ceiling(mean(no_bio_reps_ampd_per_site)),
+         ## specify the shape is an "x" if 0 and a "circle" if else
+         shapes = if_else(mean_no_bio_amps == 0, "4", "21"), 
+         ## specify label as nothing if 0 and the proportion rounded to 1 digit if else
+         labels = if_else(mean_no_bio_amps == 0, " ", 
+                          paste(mean_no_bio_amps))) %>%
+  ## remove duplicate month, year and sample info
+  select(-prop_bio_reps_ampd_per_site, -no_bio_reps_ampd_per_site,
+         -field_collection_month, -date_collected, -sample_less) %>%
+  unique(.) %>%
+  ## for scale_bar
+  mutate(long = m_longitude, lat = m_latitude)
+
+## MAKE A MAP ----
+
+# ## Find latitudes and longitudes to be centre of distribution map
+# mean(SHS_sites$m_latitude) # 13.44297
+# mean(SHS_sites$m_longitude) # 144.6521
+
+## create map style at https://mapstyle.withgoogle.com/
+s2<- "style=element:geometry%7Ccolor:0xf5f5f5&style=element:labels%7Cvisibility:off&style=element:labels.icon%7Cvisibility:off&style=element:labels.text.fill%7Ccolor:0x616161&style=element:labels.text.stroke%7Ccolor:0xf5f5f5&style=feature:administrative%7Celement:geometry%7Cvisibility:off&style=feature:administrative.land_parcel%7Cvisibility:off&style=feature:administrative.land_parcel%7Celement:labels.text.fill%7Ccolor:0xbdbdbd&style=feature:administrative.neighborhood%7Cvisibility:off&style=feature:poi%7Cvisibility:off&style=feature:poi%7Celement:geometry%7Ccolor:0xeeeeee&style=feature:poi%7Celement:labels.text.fill%7Ccolor:0x757575&style=feature:poi.park%7Celement:geometry%7Ccolor:0xe5e5e5&style=feature:poi.park%7Celement:labels.text.fill%7Ccolor:0x9e9e9e&style=feature:road%7Cvisibility:off&style=feature:road%7Celement:geometry%7Ccolor:0xffffff&style=feature:road%7Celement:labels.icon%7Cvisibility:off&style=feature:road.arterial%7Celement:labels.text.fill%7Ccolor:0x757575&style=feature:road.highway%7Celement:geometry%7Ccolor:0xdadada&style=feature:road.highway%7Celement:labels.text.fill%7Ccolor:0x616161&style=feature:road.local%7Celement:labels.text.fill%7Ccolor:0x9e9e9e&style=feature:transit%7Cvisibility:off&style=feature:transit.line%7Celement:geometry%7Ccolor:0xe5e5e5&style=feature:transit.station%7Celement:geometry%7Ccolor:0xeeeeee&style=feature:water%7Celement:geometry%7Ccolor:0xc9c9c9&style=feature:water%7Celement:labels.text.fill%7Ccolor:0x9e9e9e&size=480x360"
+
+## get a Google map of Apra Harbor (retrieves raster map from Google Maps)
+## Note that in most cases by using this function you are agreeing to the Google Maps API Terms of Service at https://cloud.google.com/maps-platform/terms/ **
+ApraHarbor <- get_googlemap(center = c(lon = 144.6521, lat = 13.44297), 
+                zoom = 13, 
+                maptype = 'terrain',
+                color = 'bw',
+                style = s2)
+
+## use ggmap to plot the the raster using the ggplot2 framework
+ggmap(ApraHarbor)
+
+## add SHS survey information to plot
+map1.0 <- ggmap(ApraHarbor, extent = "panel") +
+  ## specify the aesthetics of the "bubbles" on the plot
+  geom_point(aes(x = m_longitude, y = m_latitude, 
+                 fill = site,
+                 size = mean_no_bio_amps, shape = shapes), 
+             data = SHS_figure_map_data,
+             alpha = 0.6, 
+             stroke = 0.6) +
+  ## customise the size
+  scale_size(range = c(2, 12), guide = "none") + 
+  ## customise the shape so that 0 values are "x"
+  scale_shape_manual(values=c(21, 4), guide = "none") +
+  # limit the size of the plot (produces message, ignore it)
+  scale_x_continuous(limits = c(144.615, 144.69), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(13.415, 13.47), expand = c(0, 0)) +
+  xlab("Longitude")+
+  ylab("Latitude")+
+  ## facet the plot by month (n=2 for May and July)
+  facet_wrap(~ calendar_month_factor_mid, ncol = 3) +
+  ## move the legend and edit the facet strip panels
+  theme(legend.position="bottom", 
+        strip.background = element_blank(), 
+        panel.border = element_rect(colour = "gray30", fill = NA),
+        strip.text.x = element_text(margin = margin(0.1, 0, 0.1, 0, "cm"))) +
+  ## make it colour blind friendly
+  scale_fill_viridis(discrete=TRUE) +
+  ## edit legend appearance
+  guides(fill = guide_legend(override.aes = list(shape = 21,
+                                                 size = 5), 
+                                                 title = "Site")) +
+  ## add labels to "bubbles"
+  geom_text(aes(x = m_longitude, y = m_latitude, 
+                label = labels, 
+                size = 0.1),
+            data = SHS_figure_map_data)
+
+# map1.0
+
+# plot.new() ## use this if you get an error below
+
+## add a scale bar
+map1.2 <- map1.0 + scalebar(data = SHS_figure_map_data,
+                            dist=0.5, # distance to represent each segment of the scale bar 
+                            dist_unit="km", # unit of measurement for dist
+                            transform=TRUE, # TRUE = decimal degrees, FALSE = m
+                            model = 'WGS84', # choice of ellipsoide model (where transorm=TRUE)
+                            border.size = 0.2,
+                            box.color = "grey30",
+                            box.fill = c("grey80", "white"),
+                            st.size = 2, ## scale bar size 
+                            height = 0.09, ## height as proportion of the y-axis (0-1)
+                            location = "bottomright", ## scale bars location in the plot
+                            anchor = c(x=144.688,y=13.417), ## for corner of location
+                            st.dist = 0.1, ## distance bw scale bar and text
+                            alpha = 0 ## make the text see-through
+                            ) 
+# map1.2
+
+## add north arrow
+map1.3 <- map1.2 +  
+  annotation_north_arrow(height = unit(0.25, "cm"),
+                         width = unit(0.25,"cm"),
+                         location = "tl", ## top left
+                         pad_x = unit(0.25, "cm"),
+                         pad_y = unit(0.25, "cm"),
+                         style = north_arrow_orienteering(
+                           line_width = 1,
+                           line_col = "gray50",
+                           fill = c("gray80", "white"),
+                           text_col = NA, ## removes text?
+                           text_family = "",
+                           text_face = NULL,
+                           text_size = 0,
+                           text_angle = 0))
+map1.3
+## save it
+ggsave("docs/figure_detect.tiff", plot=map1.3, device="tiff", width=21/1.2, height=28/1.2, units="cm", dpi=500)
+```
+
+```{r bubble_plot_stats}
+## FORMAT SHS DATA FOR BUBBLE PLOT MODEL ----
+## create data frame with site-level detection data (relevant to model) only
+SHS_bubble_data <- SHS_data_full %>%
+  ## filter out blanks
+  filter(!grepl('E', sample_less)) %>%
+  ## retain only information at the site-level
+  select(field_collection_month, fc_month_factor, fc_month_number,
+         fc_month_number_cyclic, calendar_month, calendar_month_factor,
+         calendar_month_factor_mid, calendar_month_number, date_collected, 
+         site, season, season_factor, prop_bio_reps_ampd_per_site, 
+         no_bio_reps_ampd_per_site, no_bio_reps_collected_per_site) %>%
+  ## keep only unique rows (remove tech rep info)
+  unique(.) %>%
+  mutate(site_factor=factor(site)) %>%
+  ## create new calendar month number column 
+  mutate(calendar_month_number_mid = as.numeric(calendar_month_factor_mid))
+
+## export it
+write.csv(SHS_bubble_data, "docs/01.3_SHS_bubble_data.csv", row.names = FALSE)
+
+## MODEL DATA WITH GAM ----
+gam_bubble_count<-gam(no_bio_reps_ampd_per_site ~ 
+                  site_factor + 
+                  s(calendar_month_number_mid, bs="cc"),
+                  offset = no_bio_reps_collected_per_site, ## all are n = 10
+                  method = "REML",
+                  family = poisson(), ## suitable for count data
+                  data = SHS_bubble_data)
+## check diagnostics
+print(check(getViz(gam_bubble_count)))
+summary_gbc<-summary(gam_bubble_count)
+summary_gbc
+
+## Parametric coefficients:
+knitr::kable(summary_gbc$p.table, digits = 4)
+
+## Approximate significance of smooth terms:
+knitr::kable(summary_gbc$s.table, digits = 4)
+```
+
+```{r visualise_GAM, fig.height = 4, fig.width = 9}
+## visualise GAM results
+print(draw(gam_bubble_count))
+```
+
+```{r visualise_GAM_custom, fig.height = 4, fig.width = 9, include=FALSE}
+## CUSTOM DRAW GAM FUNCTION ----
+## create a modified version of gratia's draw function using code from Marco Sandri
+## https://stackoverflow.com/questions/54891823/cannot-update-edit-ggplot2-object-exported-from-a-package-gratia-in-r
+# custom_draw <- function (object, 
+#                          parametric = TRUE, select = NULL, scales = c("free","fixed"), 
+#                          align = "hv", axis = "lrtb", n = 100, unconditional = FALSE, 
+#                         overall_uncertainty = TRUE, dist = 0.1, ...) 
+# {
+#   scales <- match.arg(scales)
+#   S <- smooths(object)
+#   select <- gratia:::check_user_select_smooths(smooths = S, select = select)
+#   d <- gratia:::smooth_dim(object)
+#   take <- d <= 2L
+#   select <- select[take]
+#   S <- S[take]
+#   d <- d[take]
+#   is_re <- vapply(object[["smooth"]], gratia:::is_re_smooth, logical(1L))
+#   is_by <- vapply(object[["smooth"]], gratia:::is_by_smooth, logical(1L))
+#   if (any(is_by)) {
+#     S <- vapply(strsplit(S, ":"), `[[`, character(1L), 1L)
+#   }
+#   npara <- 0
+#   nsmooth <- length(S)
+#   if (isTRUE(parametric)) {
+#     terms <- parametric_terms(object)
+#     npara <- length(terms)
+#     p <- vector("list", length = npara)
+#   }
+#   g <- l <- vector("list", length = nsmooth)
+#   for (i in unique(S)) {
+#     eS <- evaluate_smooth(object, smooth = i, n = n, unconditional = unconditional, 
+#                           overall_uncertainty = overall_uncertainty, dist = dist)
+#     l[S == i] <- split(eS, eS[["smooth"]])
+#   }
+#   l <- l[select]
+#   d <- d[select]
+#   g <- g[select]
+#   if (length(g) == 0L) {
+#     message("Unable to draw any of the model terms.")
+#     return(invisible(g))
+#   }
+#   for (i in seq_along(l)) {
+#     g[[i]] <- draw(l[[i]])
+#   }
+#   if (isTRUE(parametric)) {
+#     for (i in seq_along(terms)) {
+#       p[[i]] <- evaluate_parametric_term(object, term = terms[i])
+#       g[[i + length(g)]] <- draw(p[[i]])
+#     }
+#   }
+#   if (isTRUE(identical(scales, "fixed"))) {
+#     wrapper <- function(x) {
+#       range(x[["est"]] + (2 * x[["se"]]), x[["est"]] - 
+#               (2 * x[["se"]]))
+#     }
+#     ylims <- range(unlist(lapply(l, wrapper)))
+#     if (isTRUE(parametric)) {
+#       ylims <- range(ylims, unlist(lapply(p, function(x) range(x[["upper"]], 
+#                                                                x[["lower"]]))))
+#     }
+#     gg <- seq_along(g)[c(d == 1L, rep(TRUE, npara))]
+#     for (i in gg) {
+#       g[[i]] <- g[[i]] + lims(y = ylims)
+#     }
+#   }
+#   g
+# }
+# 
+# ## CUSTOM PLOT ----
+# plot<-custom_draw(gam_bubble_count)
+# 
+# plot1<-plot[[1]] + 
+#   ggtitle(NULL) + 
+#   ylab("Effect of month") +
+#   xlab("Month") + 
+#   theme_bw() + 
+#   scale_x_continuous(limits=c(1, 12), 
+#                      breaks=seq(1, 12, by=1), 
+#                        labels=c("July", "August", "     September", 
+#                               "October", "November", "December", 
+#                               "January", "February", "March", 
+#                               "April", "May", "June")) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust= 1), 
+#         panel.grid.minor.x=element_blank())
+# 
+# plot2<-plot[[2]] +
+#   xlab("Site") +
+#   ylab("Partial effect of site") +
+#   ggtitle(NULL)+
+#   theme_bw() +
+#   scale_x_discrete(labels=c("Blue Hole", "Inner Harbor", "Middle Shoals", "Orote Point", "Sasa Bay"))+
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust= 1))+
+#   geom_point(fill=viridis(n=5), size=3, shape=21, stroke=0.6)
+# 
+# ## plot custom gam plot for pub
+# GAM_plot<-ggarrange(plot1, plot2, labels=c("A", "B"))
+# GAM_plot
+# 
+# ## save it
+# ggsave("docs/figure_GAM.tiff", plot=GAM_plot, device="tiff", width=210, height=297/3, units="mm", dpi=500)
+```
+
+
+
