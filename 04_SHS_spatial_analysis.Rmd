@@ -1,0 +1,643 @@
+---
+title: "SHS spatial analysis"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+QUESTION: What are the possible environmental drivers of SHS abundance in Apra Harbor, Guam?
+
+AIM: Visualise publically available, spatially variable data and use PCA to identify features that characterise each sampling site.
+
+```{r setup, include=FALSE}
+current_directory <- dirname(rstudioapi::getActiveDocumentContext()$path)
+knitr::opts_knit$set(root.dir=normalizePath(paste(current_directory)))
+```
+
+```{r load_libraries, warning=FALSE, message=FALSE}
+## LOAD LIBRARIES ----
+library(geosphere) ## distm, disGeo
+library(ggbiplot) ## ggbiplot
+library(viridis) ## colour blind friendly colour scheme
+library(RColorBrewer) ## greys
+library(ggmap) ## ggmap
+library(rgdal) ## readOGR
+library(raster) ## raster
+library(spex) ## qm_rasterToPolygons_sp
+library(ggnewscale) ## new_scale
+library(ggpubr) ## ggarrange
+library(vegan) ## rda
+library(tidyverse)
+```
+
+```{r functions, echo=FALSE}
+## ROUND2 FUNCTION ----
+
+## create round2 function which will round up from 5 (round does not)
+## https://stackoverflow.com/questions/12688717/round-up-from-5
+round2 = function(x, n) {
+  posneg = sign(x)
+  z = abs(x)*10^n
+  z = z + 0.5 + sqrt(.Machine$double.eps)
+  z = trunc(z)
+  z = z/10^n
+  z*posneg
+}
+
+## GGBIPLOTME FUNCTION ----
+# edit ggbiplot function to change arrow colour
+ggbiplotme<-function (pcobj, choices = 1:2, scale = 1, pc.biplot = TRUE, 
+                     obs.scale = 1 - scale, var.scale = scale, groups = NULL, 
+                     ellipse = FALSE, ellipse.prob = 0.68, labels = NULL, labels.size = 3, 
+                     alpha = 1, var.axes = TRUE, circle = FALSE, circle.prob = 0.69, 
+                     varname.size = 3, varname.adjust = 1.5, varname.abbrev = FALSE, 
+                     color = muted("red"), # <- add new arguments to the function
+                     linetype = "solid", # and here
+                     alpha_arrow = 1, # here too
+                     ...) 
+{
+  library(ggplot2)
+  library(plyr)
+  library(scales)
+  library(grid)
+  stopifnot(length(choices) == 2)
+  if (inherits(pcobj, "prcomp")) {
+    nobs.factor <- sqrt(nrow(pcobj$x) - 1)
+    d <- pcobj$sdev
+    u <- sweep(pcobj$x, 2, 1/(d * nobs.factor), FUN = "*")
+    v <- pcobj$rotation
+  }
+  else if (inherits(pcobj, "princomp")) {
+    nobs.factor <- sqrt(pcobj$n.obs)
+    d <- pcobj$sdev
+    u <- sweep(pcobj$scores, 2, 1/(d * nobs.factor), FUN = "*")
+    v <- pcobj$loadings
+  }
+  else if (inherits(pcobj, "PCA")) {
+    nobs.factor <- sqrt(nrow(pcobj$call$X))
+    d <- unlist(sqrt(pcobj$eig)[1])
+    u <- sweep(pcobj$ind$coord, 2, 1/(d * nobs.factor), FUN = "*")
+    v <- sweep(pcobj$var$coord, 2, sqrt(pcobj$eig[1:ncol(pcobj$var$coord), 
+                                                  1]), FUN = "/")
+  }
+  else if (inherits(pcobj, "lda")) {
+    nobs.factor <- sqrt(pcobj$N)
+    d <- pcobj$svd
+    u <- predict(pcobj)$x/nobs.factor
+    v <- pcobj$scaling
+    d.total <- sum(d^2)
+  }
+  else {
+    stop("Expected a object of class prcomp, princomp, PCA, or lda")
+  }
+  choices <- pmin(choices, ncol(u))
+  df.u <- as.data.frame(sweep(u[, choices], 2, d[choices]^obs.scale, 
+                              FUN = "*"))
+  v <- sweep(v, 2, d^var.scale, FUN = "*")
+  df.v <- as.data.frame(v[, choices])
+  names(df.u) <- c("xvar", "yvar")
+  names(df.v) <- names(df.u)
+  if (pc.biplot) {
+    df.u <- df.u * nobs.factor
+  }
+  r <- sqrt(qchisq(circle.prob, df = 2)) * prod(colMeans(df.u^2))^(1/4)
+  v.scale <- rowSums(v^2)
+  df.v <- r * df.v/sqrt(max(v.scale))
+  if (obs.scale == 0) {
+    u.axis.labs <- paste("standardized PC", choices, sep = "")
+  }
+  else {
+    u.axis.labs <- paste("PC", choices, sep = "")
+  }
+  u.axis.labs <- paste(u.axis.labs, sprintf("(%0.1f%% explained var.)", 
+                                            100 * pcobj$sdev[choices]^2/sum(pcobj$sdev^2)))
+  if (!is.null(labels)) {
+    df.u$labels <- labels
+  }
+  if (!is.null(groups)) {
+    df.u$groups <- groups
+  }
+  if (varname.abbrev) {
+    df.v$varname <- abbreviate(rownames(v))
+  }
+  else {
+    df.v$varname <- rownames(v)
+  }
+  df.v$angle <- with(df.v, (180/pi) * atan(yvar/xvar))
+  df.v$hjust = with(df.v, (1 - varname.adjust * sign(xvar))/2)
+  g <- ggplot(data = df.u, aes(x = xvar, y = yvar)) + xlab(u.axis.labs[1]) + 
+    ylab(u.axis.labs[2]) + coord_equal()
+  if (var.axes) {
+    if (circle) {
+      theta <- c(seq(-pi, pi, length = 50), seq(pi, -pi, 
+                                                length = 50))
+      circle <- data.frame(xvar = r * cos(theta), yvar = r * 
+                             sin(theta))
+      g <- g + geom_path(data = circle, color = muted("white"), 
+                         size = 1/2, alpha = 1/3)
+    }
+    g <- g + geom_segment(data = df.v, aes(x = 0, y = 0, xend = xvar, yend = yvar), 
+                          arrow = arrow(length = unit(1/2, "picas")), 
+                          color = color, linetype = linetype, alpha = alpha_arrow) ## change here
+  }
+  if (!is.null(df.u$labels)) {
+    if (!is.null(df.u$groups)) {
+      g <- g + ggrepel::geom_text_repel(aes(label = labels, color = groups), ## changed here
+                         size = labels.size)
+    }
+    else {
+      g <- g + ggrepel::geom_text_repel(aes(label = labels), size = labels.size) ## changed here
+    }
+  }
+  else {
+    if (!is.null(df.u$groups)) {
+      g <- g + geom_point(aes(color = groups), alpha = alpha)
+    }
+    else {
+      g <- g + geom_point(alpha = alpha)
+    }
+  }
+  if (!is.null(df.u$groups) && ellipse) {
+    theta <- c(seq(-pi, pi, length = 50), seq(pi, -pi, length = 50))
+    circle <- cbind(cos(theta), sin(theta))
+    ell <- ddply(df.u, "groups", function(x) {
+      if (nrow(x) <= 2) {
+        return(NULL)
+      }
+      sigma <- var(cbind(x$xvar, x$yvar))
+      mu <- c(mean(x$xvar), mean(x$yvar))
+      ed <- sqrt(qchisq(ellipse.prob, df = 2))
+      data.frame(sweep(circle %*% chol(sigma) * ed, 2, 
+                       mu, FUN = "+"), groups = x$groups[1])
+    })
+    names(ell)[1:2] <- c("xvar", "yvar")
+    g <- g + geom_path(data = ell, aes(color = groups, group = groups))
+  }
+  if (var.axes) {
+    g <- g + geom_text(data = df.v, aes(label = varname, 
+                                        x = xvar, y = yvar, angle = angle, hjust = hjust), 
+                       color = color, size = varname.size) ## changed here too
+  }
+  return(g)
+}
+
+```
+
+```{r PCA_data, warning=FALSE, message=FALSE}
+## DEPTH ----
+
+## import field sample data (including eDNA concentration)
+SHS_field_sample_data_unmod <- read.csv("docs/00.2_field_sample_data.csv")
+
+## retrieve site depth info
+depth_data <- SHS_field_sample_data_unmod %>%
+  ## extract information for first field sample each site/month
+  ## (depth was most often recorded once per day per site)
+  filter(., sample_no == 1) %>%
+  ## convert depth to m
+  mutate(depth_m = depth_ft*0.3048) %>%
+  ## select relevant columns 
+  select(., site_name, latitude, longitude, depth_m) %>%
+  ## format lat lon
+  mutate(latitude = round2(as.numeric(latitude), 5), 
+         longitude = round2(as.numeric(longitude), 4)) %>%
+  ## remove na values
+  drop_na()
+
+## TSS ----
+
+## import sentinel 2 formatted data 
+S2_site <- read.csv("docs/sentinel2_site_level_data.csv")
+
+## retrieve site TSS info
+TSS_data <- S2_site %>%
+  ## format lat lon
+  mutate(latitude = round2(as.numeric(lat), 5), 
+         longitude = round2(as.numeric(lon), 4)) %>%
+  ## calculate average TSS for each site number
+  group_by(site_name, site_num, latitude, longitude) %>%
+  summarise_at(vars(mean_green_red = green_red), mean)
+
+## COMBINE AND CALCULATE DISTANCE ----
+depth_TSS_dist_data <- depth_data %>%
+  ## combine depth and TSS by GPS points 
+  left_join(., TSS_data, by=c("latitude", "longitude", "site_name")) %>%
+  ## calculate distance from each point to harbor entrance:
+  mutate(entrance_lat = 13.4512, entrance_lon = 144.6179) %>%
+  ## calculate the distance between the two sets of points 
+  rowwise() %>%
+  mutate(distance = distm(x=c(entrance_lon, entrance_lat), 
+                          y=c(longitude, latitude), 
+                          fun = distGeo)) %>%
+  ## Blue Hole is outside the harbor, so multiply these values by -1
+  mutate(distance = ifelse(site_name == "Blue Hole", distance*-1, distance)) %>%
+  ## format lat lon
+  mutate(latitude = round2(as.numeric(latitude), 4), 
+         longitude = round2(as.numeric(longitude), 4))
+
+## BENTHIC DATA ---- 
+
+## import benthic data
+benthic_data_unmod <- read.csv("docs/guam_first_points_intersection.csv")
+
+## format data
+spatial_data <- benthic_data_unmod %>%
+  ## rename
+  rename(latitude = Latitude, longitude = Longitude) %>%
+  ## merge data sets (site numbers required)
+  left_join(., depth_TSS_dist_data, 
+            by=c("latitude", "longitude")) %>%
+  ## rename columns (from metadata file provided by NCCOS)
+  rename(major_reef_structure = M_STRUCT,
+         geomorphologic_zone = ZONE,
+         major_biological_cover = M_COVER) %>%
+  ## remove land info (due to buffer overlap)
+  filter(., geomorphologic_zone != "Land") %>%
+  ## calculate total area per site_num
+  group_by(site_num) %>%
+  add_tally(., wt=intersection_area, name = "total_area") %>%
+  ## calculate % area
+  mutate(percent_area = intersection_area/total_area*100) 
+
+spatial_data_mbc <- spatial_data %>%
+  ## calculate the total area occupied by major_biological_cover
+  group_by(site_num, major_biological_cover) %>%
+  add_tally(., wt=percent_area, name = "percent_area_sum") %>%
+  ## select columns and remove duplicate rows
+  ungroup() %>%
+  select(site_name, site_num, depth_m, mean_green_red, 
+         distance, major_biological_cover, percent_area_sum, 
+         latitude, longitude) %>%
+  unique(.) %>%
+  ## format wide for pca
+  spread(., key=major_biological_cover, value=percent_area_sum) %>%
+  ## replace missing values with zeros
+  replace(., is.na(.), 0) %>%
+  ## remove unknown
+  select(-Unknown)
+
+spatial_data_mrs <- spatial_data %>%
+  ## calculate the total area occupied by major_reef_structure
+  group_by(site_num, major_reef_structure) %>%
+  add_tally(., wt=percent_area, name = "percent_area_sum") %>%
+  ## select columns and remove duplicate rows
+  ungroup() %>%
+  select(site_name, site_num, depth_m, mean_green_red, 
+         distance, major_reef_structure, percent_area_sum, 
+         latitude, longitude) %>%
+  unique(.) %>%
+  ## format wide for pca
+  spread(., key=major_reef_structure, value=percent_area_sum) %>%
+  ## replace missing values with zeros
+  replace(., is.na(.), 0) %>%
+  ## remove unknown
+  select(-Unknown)
+
+spatial_data_full <- spatial_data_mbc %>%
+  left_join(., spatial_data_mrs, 
+            by = c("site_name", "site_num", "depth_m", "mean_green_red", "distance", "latitude", "longitude"))
+
+## export it
+write.csv(spatial_data_full, "docs/04.0_spatial_data_full.csv", row.names=FALSE)
+```
+
+```{r sum_stats, warning=FALSE, message=FALSE, fig.width=7, fig.height=7}
+## create table and plot of summary statistics
+
+spatial_data_sum <- spatial_data_full %>%
+   select(site_name, depth_m, mean_green_red, distance, Coral, Macroalgae, Turf, 
+          Uncolonized, 'Coral Reef and Hardbottom', 'Unconsolidated Sediment') %>%
+   ## add nicer names
+   rename('Depth (m)' = 'depth_m',
+              'Turbidity (B3:B4)' = 'mean_green_red',
+              'Distance from entrance (m)' = 'distance',
+              '% Coral cover' = 'Coral',
+              '% Macroalgal cover' = 'Macroalgae',
+              '% Turf algal cover' = 'Turf',
+              '% Uncolonised' = 'Uncolonized', 
+              '% Coral reef and hardbottom' = 'Coral Reef and Hardbottom',
+              '% Unconsolidated sediment' = 'Unconsolidated Sediment') %>%
+   group_by(site_name) %>%
+   summarise(across(everything(), list(mean = mean, SD = sd))) %>%
+   rename('Site' = site_name)
+
+colnames(spatial_data_sum) <- gsub("_", " ", colnames(spatial_data_sum))
+
+write.csv(spatial_data_sum, "docs/04.1_spatial_data_summary.csv", row.names = FALSE)
+
+spatial_data_long_less <- spatial_data_full %>%
+   select(site_name, depth_m, mean_green_red, distance, Coral, Macroalgae, Turf, Uncolonized, 'Coral Reef and Hardbottom', 'Unconsolidated Sediment') %>%
+   gather(., -site_name, key = "variable", value = "value") %>%
+   ## add nicer names
+   mutate(variable_name = gsub('depth_m', 'Depth (m)', variable) %>%
+                         gsub('mean_green_red', 'Turbidity (B3:B4)', .) %>%
+                         gsub('distance', 'Distance from entrance (m)', .) %>%
+                         gsub('Coral', '% Coral cover', .) %>%
+                         gsub('Macroalgae', '% Macroalgal cover', .) %>%
+                         gsub('Turf', '% Turf algal cover', .) %>%
+                         gsub('Uncolonized', '% Uncolonised', .) %>%
+                         gsub('% Coral cover Reef and Hardbottom', '% Coral reef and hardbottom', .) %>%
+                         gsub('Unconsolidated Sediment', '% Unconsolidated sediment', .))
+
+spatial_data_plot <- ggplot(spatial_data_long_less, aes(x = site_name, y = value, fill = site_name))+
+   geom_boxplot()+
+   facet_wrap(facets = "variable_name", scales = "free")+
+   theme_bw()+
+   labs(x = "Site", y = "Value")+
+   theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                   panel.grid.minor = element_blank(), 
+                   legend.position="none")+
+   scale_fill_viridis(discrete = TRUE)
+
+spatial_data_plot
+
+ggsave("docs/figure_supp_spatial_data_box.tiff", spatial_data_plot, device="tiff", 
+               width = 210, height = 297/1.5, units="mm")
+
+```
+
+```{r PCA, fig.width=3.5, fig.height=3, warning=FALSE, message=FALSE}
+## PCA ----
+
+## edit column names for plot
+pca_data_full <- spatial_data_full %>%
+  select(-latitude, -longitude) %>%
+  rename(., "Distance to entrance" = distance) %>%
+  rename(., Turbidity = mean_green_red) %>%
+  rename(., Depth = depth_m) %>%
+  rename(., "Structure: Sediment\n" = "Unconsolidated Sediment") %>%
+  rename(., "Structure: Reef and hardbottom" = "Coral Reef and Hardbottom") %>%
+  rename(., "Cover: Coral" = Coral) %>%
+  rename(., "Cover: Macroalgae" = Macroalgae) %>%
+  rename(., "Cover: Turf algae" = Turf) %>%
+  rename(., "\nCover: Uncolonised" = Uncolonized)
+
+## compute
+pca_full<-prcomp(pca_data_full[,c(3:ncol(pca_data_full))], center=TRUE, scale. = TRUE)
+
+pca_plot<-ggbiplotme(pca_full, 
+                      varname.size = 3,
+         groups=pca_data_full$site_name,
+         color="black",
+         alpha=0,
+         ellipse.alpha=0.1,
+         ellipse=TRUE
+         )+
+  # coord_cartesian(xlim = c(-3.9, 3.9), ylim=c(-3.1, 2.2)) +
+  coord_cartesian(xlim = c(-3.9, 3.9), ylim=c(-2.2, 3.2)) +
+  xlab("PC1 (54.3 % explained variance)")+
+  ylab("PC2 (16.3 % explained variance)")+
+  scale_colour_viridis(discrete="TRUE", 
+                       labels=c("Blue\nHole", "Inner\nHarbor", 
+                                "Middle\nShoals", "Orote\nPoint", "Sasa\nBay"))+
+  scale_fill_viridis(discrete="TRUE")+
+  geom_point(aes(colour=pca_data_full$site_name), size=5, alpha=0.4)+
+  theme_bw()+
+  theme(legend.position = "bottom", 
+        plot.margin=unit(c(0.5,0.2,0.75,0.4),"cm"))+ #TRBL
+  guides(color=guide_legend("Site"))
+
+pca_plot
+```
+
+```{r RDA, fig.width=7, fig.height=6, warning=FALSE, message=FALSE}
+## z-score transform data (due to different base units of measurement)
+
+# rda_data <- pca_data_full %>%
+#   mutate(sample = paste(site_name, row_number(), sep=" ")) %>%
+#   column_to_rownames(., var="sample") %>%
+#   mutate(across(Depth:'Structure: Sediment\n', ~scale(.)))
+# 
+# rda_sites <- pca_data_full %>%
+#   select(site_name)
+# 
+# ## check number of species columns 
+# names(rda_data)
+# rda_anal <- rda(rda_data[,c(3:ncol(rda_data))]~site_name, data=rda_data, scale=T)   
+# 
+# ## check summary
+# summary(rda_anal)
+# 
+# ## check for significance and amoung of vairance explained by each term
+# rda_aov<-anova.cca(rda_anal, by = "terms")
+# rda_aov
+```
+
+```{r benthic_map_data, warning=FALSE, message=FALSE}
+## MAKE A GOOGLE MAP OF APRA HARBOR ----
+
+## provide ggmap with your key
+# register_google(key = "[your key here]") 
+
+## create map style at https://mapstyle.withgoogle.com/
+s2<- "style=element:geometry%7Ccolor:0xf5f5f5&style=element:labels%7Cvisibility:off&style=element:labels.icon%7Cvisibility:off&style=element:labels.text.fill%7Ccolor:0x616161&style=element:labels.text.stroke%7Ccolor:0xf5f5f5&style=feature:administrative%7Celement:geometry%7Cvisibility:off&style=feature:administrative.land_parcel%7Cvisibility:off&style=feature:administrative.land_parcel%7Celement:labels.text.fill%7Ccolor:0xbdbdbd&style=feature:administrative.neighborhood%7Cvisibility:off&style=feature:poi%7Cvisibility:off&style=feature:poi%7Celement:geometry%7Ccolor:0xeeeeee&style=feature:poi%7Celement:labels.text.fill%7Ccolor:0x757575&style=feature:poi.park%7Celement:geometry%7Ccolor:0xe5e5e5&style=feature:poi.park%7Celement:labels.text.fill%7Ccolor:0x9e9e9e&style=feature:road%7Cvisibility:off&style=feature:road%7Celement:geometry%7Ccolor:0xffffff&style=feature:road%7Celement:labels.icon%7Cvisibility:off&style=feature:road.arterial%7Celement:labels.text.fill%7Ccolor:0x757575&style=feature:road.highway%7Celement:geometry%7Ccolor:0xdadada&style=feature:road.highway%7Celement:labels.text.fill%7Ccolor:0x616161&style=feature:road.local%7Celement:labels.text.fill%7Ccolor:0x9e9e9e&style=feature:transit%7Cvisibility:off&style=feature:transit.line%7Celement:geometry%7Ccolor:0xe5e5e5&style=feature:transit.station%7Celement:geometry%7Ccolor:0xeeeeee&style=feature:water%7Celement:geometry%7Ccolor:0xc9c9c9&style=feature:water%7Celement:labels.text.fill%7Ccolor:0x9e9e9e&size=480x360"
+## (etc.)
+## get a Google map of Apra Harbor (retrieves raster map from Google Maps)
+## Note that in most cases by using this function you are agreeing to 
+## the Google Maps API Terms of Service at:
+## https://cloud.google.com/maps-platform/terms/ **
+
+## (won't work without key)
+ApraHarbor <- get_googlemap(center = c(lon = 144.6521, lat = 13.44297),
+                            zoom = 13,
+                            maptype = 'terrain',
+                            color = 'bw',
+                            style = s2)
+
+## use ggmap to plot the the raster using the ggplot2 framework
+# ggmap(ApraHarbor)
+
+## MAKE HABITAT AND STRUCTURE MAPS OF APRA HARBOR ----
+
+## read shape file and layer into a spaital vector object
+guam_habitat <- readOGR("./docs", "guam_habitat", verbose=FALSE)
+
+## re-project data
+guam_habitat <- spTransform(guam_habitat, CRS("+proj=longlat +datum=WGS84"))
+
+## fortify data for ggplot2
+guam_habitat_fortify <- fortify(guam_habitat)
+
+## add and id field for geom_polygon
+guam_habitat@data$id <- 0:(dim(guam_habitat@data)[1]-1) 
+
+## join fortified df and habitat data by id
+guam_habitat_join = plyr::join(x = guam_habitat_fortify, 
+                               y = guam_habitat@data, 
+                               by="id") # join by id
+
+## remove unhelpful polygons for structure category 
+guam_habitat_structure <- guam_habitat_join %>%
+  filter(., M_STRUCT != "Unknown") %>%
+  filter(., M_STRUCT != "Other Delineations")
+
+## remove unhelpful polygons for cover category 
+guam_habitat_cover <- guam_habitat_join %>%
+  filter(., M_COVER != "Unclassified") %>%
+  filter(., M_COVER != "Unknown") %>%
+  filter(., M_COVER != "Seagrass") # %>% ## (none recorded)
+  # filter(., M_COVER != "Coralline Algae") ## (none recorded)
+ 
+## create some colour scales 
+five_greys <- brewer.pal(6, "Greys")[2:6]
+two_greys <- brewer.pal(3, "Greys")[2:3]
+```
+
+```{r plot_benthic_cover, warning=FALSE, message=FALSE}
+## PLOT COVER ----
+
+## create sampling points df
+sampling_points <- benthic_data_unmod %>%
+  select(Site.Name, Longitude, Latitude) %>%
+  unique(.)
+
+## edit categories names to correspond to PCA
+guam_habitat_cover_mod <- guam_habitat_cover %>%
+  mutate(M_COVER = gsub("Emergent Vegetation", "Vegetation", M_COVER),
+         M_COVER = gsub("Turf", "Turf algae", M_COVER),
+         M_COVER = gsub("Uncolonized", "Uncolonised", M_COVER), 
+         ## re-order for nice legend
+         M_COVER = factor(M_COVER, levels=c("Coralline Algae", "Coral", 
+                                            "Macroalgae", "Turf algae", 
+                                            "Uncolonised", "Vegetation")), 
+         ## re-order so middle shoals polygons are visible
+         group2 = fct_rev(group))
+
+## create plot
+cover_map <- ggmap(ApraHarbor) + 
+  geom_polygon(data=guam_habitat_cover_mod, 
+               aes(x=long, y=lat, group=group2, 
+                   fill=M_COVER))+
+  scale_fill_manual(values = brewer.pal(6, "Greys")) +
+  labs(fill = "Major\nbiological\ncover") +
+  # limit the size of the plot (produces message, ignore it)
+  scale_x_continuous(limits = c(144.615, 144.688), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(13.415, 13.4675), expand = c(0, 0)) +
+  new_scale("fill")+
+  geom_point(data = sampling_points, 
+             aes(x=Longitude, y=Latitude, 
+                 colour=Site.Name, 
+                 fill=Site.Name), 
+             size=4.5, shape=21) +
+  scale_fill_viridis(discrete=TRUE, alpha=0.3) +
+  scale_colour_viridis(discrete=TRUE)+
+  guides(fill=FALSE, colour=FALSE)+
+  theme(legend.position = "bottom", 
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5))
+
+# cover_map
+```
+
+``` {r plot_benthic_structure, warning=FALSE, message=FALSE}
+## PLOT STRUCTURE ----
+
+## edit categories names to correspond to PCA
+guam_habitat_structure_mod <- guam_habitat_structure %>%
+  mutate(M_STRUCT = gsub("Coral Reef and Hardbottom", "Reef and Hardbottom", M_STRUCT),
+         M_STRUCT = gsub("Unconsolidated Sediment", "Sediment", M_STRUCT),
+         ## relevel so middle shoals coral polygons are visible
+         group2 = fct_rev(group))
+
+## create plot
+structure_map <- ggmap(ApraHarbor) + 
+  geom_polygon(data=guam_habitat_structure_mod, 
+               aes(x=long, y=lat, group=group2, 
+                   fill=M_STRUCT))+
+  scale_fill_manual(values = two_greys) +
+  labs(fill = "Major\nreef\nstructure") +
+  # limit the size of the plot (produces message, ignore it)
+  scale_x_continuous(limits = c(144.615, 144.688), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(13.415, 13.4675), expand = c(0, 0)) +
+  guides(fill=FALSE, colour=FALSE)+
+  new_scale("fill")+
+  geom_point(data = sampling_points, 
+             aes(x=Longitude, y=Latitude, 
+                 colour=Site.Name, 
+                 fill=Site.Name), 
+             size=4.5, shape=21) +
+  scale_fill_viridis(discrete=TRUE, alpha=0.3) +
+  scale_colour_viridis(discrete=TRUE) +
+  theme(legend.position = "bottom", 
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5))
+
+structure_map
+```
+
+```{r depth_data, warning = FALSE, message=FALSE}
+## IMPORT AND FORMAT DEPTH DATA FOR APRA HARBOR ----
+## NB: This chunk will take a long time to run
+
+## data source:
+## https://pae-paha.pacioos.hawaii.edu/thredds/ncss/ngdc_bathy_10m_guam/dataset.html
+## coords: 13.4-13.5, 144.6-144.7 
+
+## try 10m data, cropped for region of interest
+depth_10m_guam <- raster("docs/ngdc_bathy_10m_guam_cropped.nc")
+
+## sp returns SpatialPolygonsDataFrame
+depth_10m_guam_qmrtpsp <- qm_rasterToPolygons_sp(depth_10m_guam, na.rm=TRUE)
+
+## add id field (for geom_polygon)
+depth_10m_guam_qmrtpsp@data$id <- 0:(dim(depth_10m_guam_qmrtpsp@data)[1]-1) 
+
+## fortify (for ggplot2)
+depth_10m_guam_qmrtpsp_fortify <- fortify(depth_10m_guam_qmrtpsp) 
+
+## join now dataframes by id (for geom_polygon)
+depth_10m_join <- plyr::join(x = depth_10m_guam_qmrtpsp_fortify, 
+                               y = depth_10m_guam_qmrtpsp@data, 
+                               by="id") 
+
+## remove deep points (so shading is more informative)
+## - 200 based on 1m Apra map at max depth 186 m
+depth_10m_join_less <- filter(depth_10m_join, elevation > -200) 
+```
+
+```{r plot_depth, warning=FALSE, message=FALSE}
+## PLOT DEPTH ----
+
+## map depths less than 200 m deep, with sampling points
+depth_map <- ggmap(ApraHarbor) + 
+  geom_polygon(data=depth_10m_join_less, 
+               aes(x=long, y=lat, group=group, 
+                   fill=elevation*-1)) +
+  scale_x_continuous(limits = c(144.615, 144.688), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(13.415, 13.4675), expand = c(0, 0)) +
+  scale_fill_gradient(low="gray90", high="gray0") +
+  labs(fill = "Depth\n(m)") +
+  guides(group=FALSE, fill=FALSE, colour=FALSE) +
+  new_scale("fill")+
+  geom_point(data = sampling_points, 
+             aes(x=Longitude, y=Latitude, 
+                 colour=Site.Name, 
+                 fill=Site.Name), 
+             size=4.5, shape=21) +
+  scale_fill_viridis(discrete=TRUE, alpha=0.3) +
+  scale_colour_viridis(discrete=TRUE) +
+  theme(legend.position = "bottom", 
+        panel.border = element_rect(colour = "black", 
+                                    fill=NA, size=0.5))
+
+depth_map
+```
+
+```{r combine_plots, warning=FALSE, message=FALSE, fig.height=9.4, fig.width=9.9}
+## COMBINE PLOTS ----
+figure_spatial<-ggarrange(structure_map,
+                 cover_map,
+                 depth_map, 
+                 pca_plot,
+                 nrow = 2, ncol = 2,
+                 labels = c("A", "B", "C", "D"))
+figure_spatial
+```
+
+#### Result: 
+
+Based on overly simplistic but full-coverage PacIOOS data for major reef structure, major biological cover and depth in Apra Harbor, as well as senitnel 2 data for turbidity and the distance of each sampling point to the harbor entrance, sampling points in our key SHS sites (Sasa Bay; yellow, Inner Harbor; blue) are characterised by sediment as the major reef structure, uncolonised biological cover or (for sasa bay) macroalgae, high turbidity, shallow depths and large distances from the harbor entrance.
+
+```{r save_plot, include=FALSE}
+ggsave("docs/figure_spatial.tiff", figure_spatial, device="tiff", 
+       width = 210*1.2, height = 297*0.8, units="mm", dpi = 500)
+```
+

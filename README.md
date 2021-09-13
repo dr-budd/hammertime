@@ -1,2 +1,0 @@
-# hammertime
-SHS monitoring

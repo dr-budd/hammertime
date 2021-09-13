@@ -1,0 +1,910 @@
+---
+title: "SHS temporal analysis"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+QUESTION: What are the possible environmental drivers of SHS abundance in Apra Harbor, Guam?
+
+AIMS: Analyse the relationship between publically available, temporally variable environmental data and SHS eDNA detections in Apra Harbor, Guam (no site level data). Identify statistically significant relationships and plot data. 
+
+```{r setup, include=FALSE}
+current_directory <- dirname(rstudioapi::getActiveDocumentContext()$path)
+knitr::opts_knit$set(root.dir=normalizePath(paste(current_directory)))
+```
+
+```{r load_libraries, warning = FALSE, message=FALSE}
+## LOAD LIBRARIES ----
+
+library(zoo) ## as.yearmon 
+library(caret) ## findCorrelation
+library(MASS) ## stepAIC 
+library(viridis) ## colour blind friendly
+library(DHARMa) ## diagnostics
+library(ggpubr) ## ggscatter
+library(glmulti) ## glmulti (model selection)
+library(leaps) ## for glmulti argument specification 
+library(tab) ## tabglm
+library(tidyverse) ## load last
+```
+
+#### PRECIPITATION DATA 
+
+Source:
+NOAA land-based station ("AGAT")
+https://www.ncdc.noaa.gov/cdo-web/datatools/findstation
+
+Citation: 
+["Users must cite this data as: Monthly Summaries of the Global Historical Climatology Network - Daily (GHCN-D). [indicate subset used]. NOAA National Climatic Data Center. [access date]."
+
+Monthly Summaries of the Global Historical Climatology Network - Daily (GHCN-D). Station AGAT; ID GHCND:GQC00914001. NOAA National Climatic Data Center. Accessed 2021/02/25."
+
+```{r AGAT, message = FALSE, warning = FALSE}
+## IMPORT PRECIPITATION DATA ----
+
+AGAT_unmod<-read.csv("docs/AGAT_2473199.csv")
+
+## FORMAT PRECIPITATION DATA ----
+## long
+AGAT_long <- AGAT_unmod %>%
+  ## format date column
+  mutate(date = as.Date(DATE, "%Y-%m-%d"),
+         ## add month_year column
+         month_year = as.yearmon(date)) %>%
+  ## filter for sampling period
+  filter(date > "2019-01-31" & date < "2020-07-31") %>%
+  ## select relevant columns
+  select(date, month_year, PRCP) %>%
+  ## rename precipitation column
+  rename(value = PRCP) %>%
+  ## create variable column
+  mutate(variable = "precipitation")
+
+## wide
+AGAT_wide <- AGAT_long %>%
+  spread(., variable, value)
+```
+
+#### AIR TEMP, ATM PRESS, WATER TEMP, WIND DIR, SPEED AND GUST DATA
+
+Source:
+From NOAA National Data Buoy Centre station APRP7
+https://www.ndbc.noaa.gov/
+
+Citation:
+["Cite as: US DOC/NOAA/NWS/NDBC > National Data Buoy Center (1971). Meteorological and oceanographic data collected from the National Data Buoy Center Coastal-Marine Automated Network (C-MAN) and moored (weather) buoys. [indicate subset used]. NOAA National Centers for Environmental Information. Dataset. https://accession.nodc.noaa.gov/NDBC-CMANWx. Accessed [date]."
+
+US DOC/NOAA/NWS/NDBC > National Data Buoy Center (1971). Meteorological and oceanographic data collected from the National Data Buoy Center Coastal-Marine Automated Network (C-MAN) and moored (weather) buoys. Station APRP7 - 1630000 - Apra Harbour, Guam. NOAA National Centers for Environmental Information. Dataset. https://accession.nodc.noaa.gov/NDBC-CMANWx. Accessed 2021/03/08."
+
+```{r APRP7, message = FALSE, warning = FALSE}
+## IMPORT AIR TEMP, ATM PRESS, WATER TEMP, WIND DIR, SPEED AND GUST DATA ----
+
+## import 2019 data
+APRP7_2019<-read.delim("docs/buoy_aprp7h2019.txt", ## file name
+                 sep="", ## any number of spaces as separator
+                 skip=2, ## skip the first two lines
+                 header=FALSE)
+
+## import 2020 data
+APRP7_2020<-read.delim("docs/buoy_aprp7h2020.txt", ## file name
+                 sep="", ## any number of spaces as separator
+                 skip=2, ## skip the first two lines
+                 header=FALSE)
+
+## read in header line 1
+header1 <- scan("docs/buoy_aprp7h2019.txt", nlines = 1, what = character())
+
+## read in header line 2
+header2 <- scan("docs/buoy_aprp7h2019.txt", nlines = 1, skip=1, what = character())
+
+## create vector containing header information
+headers=NULL
+for (i in seq_along(header1)) {
+  header<-paste0(header1[i], ".", header2[i])
+  headers<-append(header, headers)
+}
+
+## reverse the order
+headers<-rev(headers)
+
+## add to data frames
+names(APRP7_2019) <- headers
+names(APRP7_2020) <- headers
+
+## combine them
+APRP7_unmod <- rbind.data.frame(APRP7_2019, APRP7_2020)
+
+## remove redundant info
+rm(APRP7_2019, APRP7_2020, header, header1, header2, headers, i)
+
+## FORMAT AIR TEMP, ATM PRESS., WATER TEMP, WIND DIR, SPEED AND GUST DATA ----
+## long
+APRP7_long <- APRP7_unmod %>%
+  ## rename year column
+  rename(YY.yr = "#YY.#yr") %>%
+  ## create date column
+  mutate(date=as.Date(paste(YY.yr, MM.mo, DD.dy, sep="-"), "%Y-%m-%d")) %>%
+  ## filter for sampling period
+  filter(date > "2019-01-31" & date < "2020-07-31") %>%
+  ## add month_year column
+  mutate(month_year = as.yearmon(date)) %>%
+  ## add hour minute column
+  mutate(date_time = as.POSIXct(paste(date, paste(hh.hr, mm.mn, sep=":"), sep=" "))) %>%
+  ## rename data columns
+  rename(wind_direction = WDIR.degT,
+        wind_speed = "WSPD.m/s", 
+        wind_gust = "GST.m/s", 
+        atmospheric_press = PRES.hPa,
+        air_temp = ATMP.degC,
+        water_temp = WTMP.degC,
+        dewpoint_temp = DEWP.degC,
+        avg_wave_prd = APD.sec,
+        dom_wave_prd = DPD.sec,
+        visibility = VIS.mi,
+        wave_height = WVHT.m,
+        mean_wave_dir = MWD.degT,
+        water_level = TIDE.ft) %>%
+  ## remove columns
+  select(-c(YY.yr, MM.mo, DD.dy, hh.hr, mm.mn)) %>%
+  ## gather data
+  gather(., key="variable", value="value",
+         -c(date, month_year, date_time)) %>%
+  ## format values as numeric
+  mutate(value=as.numeric(value)) %>%
+  ## filter out erroneous values
+  filter(., value != 99 & value != 999 & value != 9999)
+
+## wide
+APRP7_wide <- APRP7_long %>%
+  spread(., variable, value)
+
+```
+
+#### SALINITY, TEMPERATURE AND WATER VELOCITY DATA
+
+Source:
+HYCOM (Google Earth Engine)
+https://developers.google.com/earth-engine/datasets/catalog/HYCOM_sea_temp_salinity
+https://developers.google.com/earth-engine/datasets/catalog/HYCOM_sea_water_velocity
+
+Citations:
+
+HYCOM
+J. A. Cummings and O. M. Smedstad. 2013: Variational Data Assimilation for the Global Ocean. Data Assimilation for Atmospheric, Oceanic and Hydrologic Applications vol II, chapter 13, 303-343.
+
+Google Earth Engine
+Gorelick, N., Hancher, M., Dixon, M., Ilyushchenko, S., Thau, D., & Moore, R. (2017). Google Earth Engine: Planetary-scale geospatial analysis for everyone. Remote Sensing of Environment.
+
+```{r HYCOM, message = FALSE, warning = FALSE}
+## IMPORT SALINITY, TEMPERATURE AND WATER VELOCITY DATA ----
+
+## import water temperature and salinity
+HYCOM_wt_salin_unmod<-read.csv("docs/guam_wt_salin.csv")
+
+## water velocity
+HYCOM_wv_unmod<-read.csv("docs/guam_wv.csv")
+
+## FORMAT SALINITY, TEMPERATURE AND WATER VELOCITY DATA ----
+
+## create functions for HYCOM scale and offset
+scale_offset <- function (x) (x)*0.001+20
+scale <- function (x) (x)*0.001
+
+## format water temperature and salinity data
+HYCOM_wt_salin<-HYCOM_wt_salin_unmod %>%
+  mutate(date=substr(system.index, 1, 8),
+         date=as.Date(date, format="%Y%m%d")) %>%
+  ## scale and offset HYCOM data 
+  mutate(across(c(salinity_0:water_temp_8), scale_offset)) %>%
+  ## filter for sampling period
+  filter(date > "2019-01-31" & date < "2020-07-31") %>%
+  ## add measurement number column
+  mutate(meas_num = substr(system.index, 9, 10)) %>%
+  ## remove unwanted columns
+  select(-system.index, -.geo)
+
+## format water velocity data
+HYCOM_wv <- HYCOM_wv_unmod %>%
+  mutate(date=substr(system.index, 1, 8),
+         date=as.Date(date, format="%Y%m%d")) %>%
+  ## scale HYCOM wv data 
+  mutate(across(c(velocity_u_0:velocity_v_8), scale)) %>%
+  ## filter for sampling period
+  filter(date > "2019-01-31" & date < "2020-07-31") %>%
+  ## add measurement number column
+  mutate(meas_num = substr(system.index, 9, 10)) %>%
+  ## remove unwanted columns
+  select(-system.index, -.geo) 
+
+## combine wide
+HYCOM_wide <- HYCOM_wt_salin %>%
+  full_join(., HYCOM_wv, by=c("date", "meas_num")) %>%
+  mutate(month_year=as.yearmon(date)) %>%
+  relocate(month_year, date, meas_num)
+            
+## long
+HYCOM_long <- HYCOM_wide %>%
+  gather(., key="variable", value="value", -month_year, -date, -meas_num)
+
+```
+
+#### SENTINEL 2 (TURBIDITY) DATA
+
+Source:
+https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_S2#description
+
+Citations:
+
+Sentinel2
+Copernicus Sentinel-2 MultiSpectral Instrument, Level-1C data [years accessed]. Retrieved from Google Earth Engine [access date].
+
+Copernicus Sentinel-2 MultiSpectral Instrument, Level-1C data (years 2019-2020). Retrieved from Google Earth Engine (accessed 2020/12/09).
+
+Google Earth Engine
+Gorelick, N., Hancher, M., Dixon, M., Ilyushchenko, S., Thau, D., & Moore, R. (2017). Google Earth Engine: Planetary-scale geospatial analysis for everyone. Remote Sensing of Environment.
+
+```{r SENTINEL2, message = FALSE, warning = FALSE}
+## IMPORT SENTINEL2 DATA ----
+
+## import satellite observations
+S2_unmod<-read.csv("docs/guam_S2_collection.csv")
+
+## import s2 point information (includes Secchi points)
+points_unmod<-read.csv("docs/guam_S2_points.csv")
+
+## import sampling points from field data
+sampling_points<-read.csv("docs/01.1_sampling_points.csv")
+
+## id secchi points 
+secchi_points <- anti_join(points_unmod, 
+                           sampling_points, 
+                           by=c("lat" = "latitude", "lon" = "longitude")) %>%
+  rename(latitude = lat, longitude = lon)
+
+## FORMAT SENTINEL2 OCEAN COLOUR DATA ----
+
+## create scale function for s2 data
+scale_s2 <- function (x) (x)*0.0001
+
+## format data
+S2_site<-S2_unmod %>%
+  ## add date and month_year columns
+  mutate(Date=substr(system.index, 1, 8),
+         date=as.Date(Date, format="%Y%m%d"), 
+         month_year=as.yearmon(date)) %>%
+  ## filter dates for sampling period
+  filter(date > "2019-01-31" & date < "2020-07-31") %>%
+  ## scale data
+  mutate(across(c(B1:B8A), scale_s2)) %>%
+  ## calculate red:green values 
+  mutate(red_green=B4/B3, green_red=B3/B4) %>%
+  ## add site names
+  left_join(., points_unmod, by="site_num") %>%
+  ## remove secchi points 
+  anti_join(., secchi_points, by = c("site_num", "site_name")) %>%
+  mutate(site_name = gsub("sasa_bay", "Sasa Bay", site_name) %>%
+           gsub("blue_hole", "Blue Hole", .) %>%
+           gsub("inner_harbour", "Inner Harbor", .) %>%
+           gsub("middle_shoals", "Middle Shoals", .) %>%
+           gsub("orote_point", "Orote Point", .)) %>%
+  ## select relevant columns
+  select(date, month_year, site_name, site_num, lat, lon, red_green, green_red)
+
+## export data
+write.csv(S2_site, "docs/sentinel2_site_level_data.csv", row.names=FALSE)
+
+## wide
+S2_wide <- S2_site %>%
+  ## calculate daily mean values for Apra Harbor (combine sites)
+  group_by(month_year, date) %>%
+  summarise(across(red_green:green_red, mean, na.rm=TRUE, .names = "mean_{.col}"))
+
+## long
+S2_long <- S2_wide %>%
+  gather(., key="variable", value="value", -date, -month_year)
+
+```
+
+
+```{r month_data}
+## CALCULATE MONTHLY MEAN MIN MAX ----
+
+## NOAA land-based station data
+AGAT_mmmm <- AGAT_wide %>%
+  group_by(month_year) %>%
+  summarise(., mean_precipitation = mean(precipitation), 
+            max_precipitation = max(precipitation), 
+            min_precipitation = min(precipitation))
+
+## NOAA buoy data
+APRP7_mmmm <- APRP7_wide %>%
+  group_by(month_year) %>%
+  summarise(across(air_temp:wind_speed, mean, na.rm=TRUE, .names = "mean_{.col}"), 
+            across(air_temp:wind_speed, max, na.rm=TRUE, .names = "max_{.col}"), 
+            across(air_temp:wind_speed, min, na.rm=TRUE, .names = "min_{.col}"))
+
+## HYCOM data
+HYCOM_mmmm <- HYCOM_wide %>%
+  group_by(month_year) %>%
+  summarise(across(salinity_0:velocity_v_8, mean, na.rm=TRUE, .names = "mean_{.col}"), 
+            across(salinity_0:velocity_v_8, max, na.rm=TRUE, .names = "max_{.col}"), 
+            across(salinity_0:velocity_v_8, min, na.rm=TRUE, .names = "min_{.col}"))
+
+## sentinel2 data
+S2_mmmm <- S2_site %>%
+  group_by(month_year) %>%
+  summarise(across(red_green:green_red, mean, na.rm=TRUE, .names = "mean_{.col}"), 
+            across(red_green:green_red, max, na.rm=TRUE, .names = "max_{.col}"), 
+            across(red_green:green_red, min, na.rm=TRUE, .names = "min_{.col}"))
+
+## IMPORT DETECTIONS DATA AND CONCATENATE WITH ENVIRONMENTAL DATA ----
+
+## import and edit detection data
+SHS_bubble_data<-read.csv("docs/01.3_SHS_bubble_data.csv")
+
+## calculate absolute number of detections per month (ignore site)
+SHS_ad <- SHS_bubble_data %>%
+  mutate(month_year = as.yearmon(as.Date(date_collected, "%Y-%m-%d"))) %>%
+  select(month_year, site, no_bio_reps_ampd_per_site) %>% 
+  group_by(month_year) %>%
+  summarise(., absolute_no_detects = sum(no_bio_reps_ampd_per_site, na.rm=TRUE))
+
+## concatenate df (inc. detections)
+enviro_mmmm <- AGAT_mmmm %>%
+  full_join(., APRP7_mmmm, by="month_year") %>%
+  full_join(., HYCOM_mmmm, by="month_year") %>%
+  full_join(., S2_mmmm, by="month_year") %>%
+  full_join(., SHS_ad, by="month_year")
+
+## get means only
+enviro_mm <- enviro_mmmm %>%
+  select(month_year, grep("mean", names(enviro_mmmm), value=TRUE), absolute_no_detects)
+
+## export data
+write.csv(enviro_mmmm, "docs/03.1_SHS_enviro_mmmm.csv", row.names=FALSE)
+
+## export data
+write.csv(enviro_mm, "docs/03.0_SHS_enviro_mm.csv", row.names=FALSE)
+```
+
+```{r check_covar_corr, warning = FALSE, message = FALSE, fig.width = 7, fig.height = 4}
+## CHECK FOR CLOSELY CORRELATED COVARIATES ----
+
+## NOAA data
+par(mar=c(1,1,1,1))
+plot(enviro_mm[2:8])
+cm<-cor(enviro_mm[2:8])
+findCorrelation(
+  cm,
+  cutoff = 0.95,
+  verbose = FALSE,
+  names = TRUE,
+  exact = TRUE
+)
+```
+
+Wind gust and wind speed are highly correlated.
+
+*"Wind Speed is defined by the National Weather Service as a snapshot of the sustained wind speed in knots valid for the indicated hour. Wind Gusts is defined by the National Weather Service as a quick and sudden increase in the speed of wind."*
+
+We will remove wind gust and retain the other variables (mean_precipitation, mean_air_temp, mean_atmospheric_press, mean_water_temp, mean_wind_direction and mean_wind_speed).
+
+```{r salinity_corrs,  warning = FALSE, message = FALSE, fig.width = 7, fig.height = 4}
+
+## salinity 
+plot(enviro_mm[9:14]) 
+```
+
+```{r salinity_vars,  warning = FALSE, message = FALSE, fig.width = 4, fig.height = 6}
+
+## which is the most relevant?
+## we can validate the remotely sensed salinity data we some available in-situ probe data
+## import probe data
+probe_unmod<-read.csv("docs/Appendix_03.csv")
+
+## calculate daily means
+probe_daily_sal <- probe_unmod %>%
+  ## split combined date and time column
+  separate(DateTime, c("Date", "Time"), " ") %>% 
+  ## convert format to date
+  mutate(date=as.Date(Date)) %>% 
+  ## add month year column
+  mutate(month_year = as.yearmon(date)) %>% 
+  ## remove variables other than salinity
+  select(-c(Lat, Lon, Station, 
+            Temperature, Depth, DissOxygen, Turbidity, pH)) %>% 
+  ## remove NA rows
+  drop_na(.) %>%
+  ## get daily means
+  group_by(date) %>%
+  summarise(dm_salin = mean(Salinity)) %>%
+  ## filter for sampling period
+  filter(date > "2019-01-31" & date < "2020-07-31")
+
+HYCOM_sal <- HYCOM_wide %>%
+  group_by(date) %>%
+  summarise(across(salinity_0:salinity_8, mean, .names = "dm_{.col}"))
+
+sal <- HYCOM_sal %>%
+  na.omit(.) %>%
+  gather(measure, HYCOM_sal, -date) %>%
+  full_join(., probe_daily_sal, by="date")
+
+SAL<-ggscatter(sal, x = "HYCOM_sal", y = "dm_salin",
+          add = "reg.line",
+          conf.int = TRUE,
+          color = "measure",
+          facet.by = "measure",
+          nrow = 3, 
+          panel.labs = list(measure = c("0 m", "10 m", "2 m", "4 m", "6 m", "8 m")),
+          scales = "free",
+          # title = "Probe salinity ~ HYCOM salinity",
+          ggtheme = theme(legend.position="none"),
+          xlab = "Mean daily salinity (psu; probe reading)", 
+          ylab = "Mean daily salinity (psu; HYCOM value)")+
+  stat_cor(method = "pearson")
+
+SAL
+
+ggsave("docs/figure_supp_sal_val.png", SAL, device="png", 
+       width = 210, height = 297/1.2, units="mm")
+
+## retain only 2 m data for HYCOM (best correlation)
+sal2 <- sal %>%
+  filter(., measure == "dm_salinity_2" 
+         & date < "2020-01-01") %>% ## max probe date
+  select(-measure) %>%
+  gather(., key = "variable", value = "value", -date)
+
+## plot by date
+
+# facet label names
+var.labs <- c("Probe daily means", "HYCOM 2 m daily means")
+names(var.labs) <- c("dm_salin", "HYCOM_sal")
+
+SAL_date <- ggplot(sal2, aes(x=date, y=value, colour=variable))+
+  geom_point()+
+  geom_line()+
+  facet_wrap("variable", nrow=2, scales="free", 
+             labeller=labeller(variable = var.labs))+
+  scale_x_date(date_breaks = "1 month")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank(), 
+        legend.position="none")+
+  xlab("Date")+
+  ylab("Salinity (psu)")
+
+ggsave("docs/figure_supp_sal_val2.png", SAL_date, device="png", 
+       width = 210, height = 297/2, units="mm")
+
+```
+
+Salinity at 2 m has the highest correlation and lowest p-value with in-situ probe data, so we will use it in our model. 
+
+We will remove all HYCOM temperature data, as it is redundant with NOAA buoy data. 
+
+```{r velocity_vars, warning = FALSE, message = FALSE, fig.width = 7, fig.height = 4}
+## velocity u
+plot(enviro_mm[21:26]) 
+unique(sort(cor(enviro_mm[21:26]), TRUE)) 
+cor(enviro_mm[21:26]) ## mean_velocity_u_4 is a good proxy for eastward water velocity in general
+## keep: mean_velocity_u_4
+
+## velocity v
+plot(enviro_mm[27:32]) 
+unique(sort(cor(enviro_mm[27:32]), TRUE))
+cor(enviro_mm[27:32]) ## mean_velocity_v_8 is a good proxy for northward water velocity in general
+## keep: mean_velocity_v_8
+```
+
+Eastward velocity at 4 m and northward velocity at 8 m are the best proxies for predicted eastward and northward water velocity overall, so we will include these in our model.
+
+```{r turbidity_vars, warning = FALSE, message = FALSE, fig.width = 6, fig.height = 3}
+## we can also validate the remotely sensed Turbidity data with our in-situ probe data
+
+## calculate daily means
+probe_daily_turb <- probe_unmod %>%
+  ## split combined date and time column
+  separate(DateTime, c("Date", "Time"), " ") %>% 
+  ## convert format to date
+  mutate(date=as.Date(Date)) %>% 
+  ## add month year column
+  mutate(month_year = as.yearmon(date)) %>% 
+  ## add site info
+  filter(Station != "DbleReefH22" & Station != "PatiFl01") %>% 
+  mutate(site = gsub("AnchorFl06", "Sasa Bay", Station) %>%
+           gsub("BlueHole", "Blue Hole", .) %>%
+           gsub("InnerHarbor", "Inner Harbor", .) %>%
+           gsub("MiddleFl02", "Middle Shoals", .) %>%
+           gsub("OroteFl04", "Orote Point", .)) %>%
+  ## remove columns
+  select(-c(Lat, Lon, Station, 
+            Temperature, Depth, DissOxygen, Salinity, pH)) %>% 
+  ## remove NA rows
+  drop_na(.) %>%
+  ## get daily means
+  group_by(date, site) %>%
+  summarise(dm_turbidity = mean(Turbidity))
+  
+S2_dm <- S2_unmod %>%
+  mutate(date=substr(system.index, 1, 8),
+         date=as.Date(date, format="%Y%m%d"), 
+         month_year=as.yearmon(date)) %>%
+  ## filter dates for sampling period
+  filter(date > "2019-01-31" & date < "2020-07-31") %>%
+  ## scale data
+  mutate(across(c(B1:B8A), scale_s2)) %>%
+  ## calculate red:green values 
+  mutate(red_green=B4/B3, green_red=B3/B4) %>%
+  ## add site names
+  left_join(., points_unmod, by="site_num") %>%
+  ## remove secchi points 
+  anti_join(., secchi_points, by = c("site_num", "site_name")) %>%
+  ## correct site names
+  mutate(site = gsub("sasa_bay", "Sasa Bay", site_name) %>%
+           gsub("blue_hole", "Blue Hole", .) %>%
+           gsub("inner_harbour", "Inner Harbor", .) %>%
+           gsub("middle_shoals", "Middle Shoals", .) %>%
+           gsub("orote_point", "Orote Point", .)) %>%
+  ## select relevant columns
+  select(date, month_year, site, site_num, red_green, green_red) %>%
+  ## calculate daily means
+  group_by(date, site) %>%
+  summarise(across(red_green:green_red, mean, na.rm=TRUE, .names = "dm_{.col}"))
+
+## combine s2 and old probe daily data 
+daily_S2_probe_data <- probe_daily_turb %>%
+  inner_join(., S2_dm, by=c("date", "site")) %>%
+  group_by(date, site) %>%
+  summarise(across(dm_turbidity:dm_green_red, log, .names = "ln_{.col}")) %>%
+  gather(., key = "S2_turb_type", value = "S2_turb_value", -date, -site, -ln_dm_turbidity)
+
+## plot R:G
+TURB <- ggscatter(daily_S2_probe_data, x = "ln_dm_turbidity", y = "S2_turb_value", 
+          add = "reg.line", 
+          conf.int = TRUE, 
+          color = "S2_turb_type",
+          facet.by = "S2_turb_type",
+          panel.labs = list(S2_turb_type = c("Mean daily green:red", "Mean daily red:green")),
+          scales = "free",
+          # title = "Probe turbidity ~ Sentinel2",
+          ggtheme = theme(legend.position="none"),
+          xlab = "ln[turbidity (probe reading)]", 
+          ylab = "ln[turbidity (S2 satellite value)]")+ 
+    stat_cor(method = "pearson")
+
+TURB
+
+ggsave("docs/figure_supp_turb_val.png", TURB, device="png", 
+       width = 210, height = 297/3, units="mm")
+
+```
+
+The ratio between the green and the red (green:red) band values from Sentinel2 correlate positively with in-situ measurements of turbidity (probe data)
+
+```{r model_selection, warning = FALSE, message = FALSE, fig.width = 7, fig.height = 4}
+## MODEL SELECTION ----
+## following: https://www.r-bloggers.com/2013/02/model-selection-and-multi-model-inference/
+
+## keep only the representative variables chosen above
+enviro_mmmm_less <- enviro_mmmm %>%
+  select(absolute_no_detects, 
+         mean_precipitation, min_precipitation, max_precipitation,
+         mean_atmospheric_press, min_atmospheric_press, max_atmospheric_press, 
+         mean_water_temp, min_water_temp, max_water_temp,
+         mean_wind_direction, min_wind_direction, max_wind_direction,
+         mean_wind_speed, min_wind_speed, max_wind_speed,
+         mean_salinity_2, min_salinity_2, max_salinity_2,
+         mean_velocity_u_4, min_velocity_u_4, max_velocity_u_4, 
+         mean_velocity_v_8, min_velocity_v_8, max_velocity_v_8, 
+         mean_green_red, min_green_red, max_green_red, 
+         month_year) %>%
+  mutate(season = ifelse(grepl("Dec", month_year), "wet", ## transitional month
+                    ifelse(grepl("Jan", month_year), "dry",
+                      ifelse(grepl("Feb", month_year), "dry",
+                        ifelse(grepl("Mar", month_year), "dry",
+                          ifelse(grepl("Apr", month_year), "dry",
+                            ifelse(grepl("May", month_year), "dry",
+                              ifelse(grepl("Jun", month_year), "dry", ## transitional month
+                                ifelse(grepl("Jul", month_year), "wet",
+                                  ifelse(grepl("Aug", month_year), "wet",
+                                    ifelse(grepl("Sep", month_year), "wet",
+                                      ifelse(grepl("Oct", month_year), "wet",
+                                         ifelse(grepl("Nov", month_year), "wet",                                                                                          "None")))))))))))),
+         season_factor = factor(season)) %>%
+  select(-season, -month_year) %>%
+  na.omit(.)
+
+## perform model selection
+
+## remove some unhelpful data
+enviro_mmmm_less_less <- enviro_mmmm_less %>%
+  select(-min_precipitation, ## all zero values
+         -min_wind_direction, ## small range: 0 - 20
+         -max_wind_direction, ## small range: 210 - 360
+         -min_wind_speed, ## small range: 0 - 0.1
+         -season_factor) ## NS in all models tested
+
+## create a global model for monthly means, mins, maxs
+global_mmmm_model <- glm(absolute_no_detects ~ ., 
+                         data = enviro_mmmm_less_less, 
+                         na.action = na.fail)
+
+best_mmmm_model <- glmulti(global_mmmm_model, 
+                           level=1, ## specify only main effects
+                           method="l", ## very fast exhaustive branch-and-bound algorithm 
+                           crit="aicc") ## penalty for more covariates
+
+print(best_mmmm_model) ## summary of results
+plot(best_mmmm_model) ## AICc value plot for all models
+plot(best_mmmm_model, type="s") ## importance of terms
+
+w<-weightable(best_mmmm_model)[1:10,]
+w
+
+## according to theory, models with AIC within two points of each other are basically equal
+
+## extract the top three formula
+formula1<-(weightable(best_mmmm_model)[1,1])
+formula2<-(weightable(best_mmmm_model)[2,1])
+formula3<-(weightable(best_mmmm_model)[3,1])
+
+## run the top 3 models
+m1<-glm(formula1, data=enviro_mmmm_less_less)
+m2<-glm(formula2, data=enviro_mmmm_less_less)
+m3<-glm(formula3, data=enviro_mmmm_less_less)
+
+## print summaries
+summary(m1)
+summary(m2)
+summary(m3)
+
+## run exhaustive screening on the potential variables
+enviro_mmmm_reduced <- enviro_mmmm_less %>%
+  select(absolute_no_detects, max_precipitation, 
+         min_atmospheric_press, mean_water_temp, mean_velocity_v_8, 
+         mean_wind_direction, mean_wind_speed, mean_green_red, 
+         max_atmospheric_press, season_factor) 
+
+reduced_mmmm_model <- glm(absolute_no_detects ~ ., 
+                         data = enviro_mmmm_reduced, 
+                         na.action = na.fail)
+
+br_mmmm_model <- glmulti(reduced_mmmm_model, 
+                           level=1, ## specify only main effects
+                           method="h", ## exhaustive screening
+                         plotty=FALSE,
+                           crit="aicc") ## penalty for more covariates
+
+print(br_mmmm_model) ## summary of results
+plot(br_mmmm_model) ## AICc value plot for all models
+plot(br_mmmm_model, type="s") ## importance of terms
+
+w2<-weightable(br_mmmm_model)[1:10,]
+w2
+
+summary(br_mmmm_model@objects[[1]])
+summary(br_mmmm_model@objects[[2]])
+summary(br_mmmm_model@objects[[3]])
+
+## top 3 are the same, so we are confident
+
+## compare AIC, BIC and AICc
+model_comparison<-left_join(as.data.frame(AIC(m1, m2, m3)) %>% rownames_to_column(., var="model"), 
+                          as.data.frame(BIC(m1, m2, m3)) %>% rownames_to_column(., var="model"),
+                          by = c("df", "model")) %>%
+  left_join(., as.data.frame(MuMIn::AICc(m1, m2, m3)) %>% rownames_to_column(., var="model"),
+            by = c("df", "model")) %>%
+  mutate(formula = paste(c(formula1, formula2, formula3)))
+
+## export table for supplementary
+write.csv(model_comparison, "docs/model_comparison.csv", row.names=FALSE)
+
+## since the aicc for these three models are approximately equal, 
+## but the AIC for model 2 is much but the AIC and BIC for model 2
+## suggest the model is more informative (also elasmobranchs are known
+## to respond to changes in ATM) we will stick with model 2
+
+## check diagnostics
+residuals<-simulateResiduals(m2, plot=TRUE) ## ok 
+
+## try poisson ditrubution (because we are using count data)
+m2p<-glm(formula2, family=poisson, data=enviro_mmmm_less_less)
+summary(m2p)
+residuals<-simulateResiduals(m2p, plot=TRUE) ## not ok
+testDispersion(residuals)
+
+## poisson model is underdispersed, we will stick to the first m2 model. 
+```
+\newpage
+
+## RESULTS 
+
+According to our reduced model, max atm pressure, mean water temperature, mean wind direction, mean wind speed, mean northward water velocity and mean turbidity all affect SHS:
+
+```{r table, echo=FALSE}
+# make table 
+# x<-tabglm(m2,
+#        columns = c("beta", "se", "test", "p"),
+#        xvarlabels = list(max_atmospheric_press = "Max atmospheric pressure (atm)",
+#                          mean_water_temp = "Mean water temp. (°C)",
+#                          mean_wind_direction = "Mean wind dir. (°)",
+#                          mean_wind_speed = "Mean wind speed (m/s)",
+#                          mean_velocity_v_8 = "Mean nwd water velocity (m/s)",
+#                          mean_green_red = "Mean turbidity (as green:red)"),
+#        latex=TRUE,
+#        print.html = TRUE, 
+#        html.filename = "table_temporal.html")
+# 
+# kableExtra::save_kable(knitr::kable(x), file = "table_temporal.png")
+# 
+# knitr::kable(x)
+
+summary(m2)
+
+```
+
+\newpage
+
+## RESULTS (CONT.)
+
+And here is a plot of all the covariates as well as the absolute number of detections (all sites) over the sampling period, the wet season is shaded in blue:
+
+``` {r plot_data, echo=FALSE, fig.width = 5, fig.height = 6}
+
+## FORMAT PLOT DATA ----
+SHS_long_less <- SHS_ad %>%
+  mutate(date = as.Date(month_year)+14) %>% ## so the value is mid-month
+  rename(value = absolute_no_detects) %>%
+  mutate(variable = "absolute_no_detects") %>%
+  select(-month_year)
+
+AGAT_long_less <- AGAT_long %>%
+    ungroup(.) %>%
+  select(date, variable, value)
+
+APRP7_long_less <- APRP7_long %>%
+    ungroup(.) %>%
+    select(date, variable, value)
+
+HYCOM_long_less <- HYCOM_long %>%
+    ungroup(.) %>%
+    select(date, variable, value)
+
+S2_long_less <- S2_long %>%
+  ungroup(.) %>%
+    select(date, variable, value)
+  
+## bind data frames and add a variable_label column for plot
+enviro_long <- rbind(AGAT_long_less, APRP7_long_less, 
+                     HYCOM_long_less, S2_long_less, 
+                     SHS_long_less) %>%
+  ## filter variables you want
+  filter(variable %in% c("absolute_no_detects", 
+         "precipitation", 
+         "atmospheric_press", 
+         "water_temp", 
+         "wind_direction", 
+         "wind_speed", 
+         "salinity_2", 
+         "velocity_u_4", 
+         "velocity_v_8",
+         "mean_green_red")) %>%
+  mutate(variable_label = gsub("atmospheric_press", "Atmospheric\npress. (hPa)", variable) %>%
+           gsub("mean_green_red", "Turbidity\n(green:red)", .) %>%
+           gsub("precipitation", "Precipitation\n(mm)", .) %>%
+           gsub("salinity_2", "Salinity\n(psu)", .) %>%
+           gsub("velocity_u_4", "Ewd water\nvelocity (m/s)", .) %>%
+           gsub("velocity_v_8", "Nwd water\nvelocity (m/s)", .) %>%
+           gsub("water_temp", "Water temp.\n(°C)", .) %>%
+           gsub("wind_direction", "Wind dir.\n(°)", .) %>%
+           gsub("wind_speed", "Wind speed\n(m/s)", .)  %>%
+           gsub("absolute_no_detects", "Total eDNA\ndetections", .)) %>%
+  mutate(variable_label = 
+           factor(variable_label, 
+                  levels=c("Total eDNA\ndetections", "Turbidity\n(green:red)", 
+                           "Water temp.\n(°C)", "Salinity\n(psu)",  
+                            "Wind dir.\n(°)", "Wind speed\n(m/s)", 
+                            "Ewd water\nvelocity (m/s)", "Nwd water\nvelocity (m/s)",
+                            "Atmospheric\npress. (hPa)", "Precipitation\n(mm)"))) %>%
+  ## reduce max precipitation value to 2nd highest to scale axis
+  mutate(., value = recode(value, `197.6` = 119.4))
+
+## PLOT ALL COVARIATES TESTED ----
+ed<-ggplot(data=enviro_long, aes(date, y=value, colour=variable)) +
+  geom_line() +
+  geom_point(data=filter(enviro_long, variable == "absolute_no_detects"), 
+                         aes(date, y=value, colour=variable), 
+             shape=3, size=0.5)+
+  # facet_grid(variable ~., scales = "free")+
+  facet_wrap(~ variable_label, scales = "free_y", ncol = 1, 
+             strip.position = "left")+
+  ylab(NULL)+
+  xlab(NULL)+
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank(),
+        legend.position = "none", 
+        strip.background = element_blank(), 
+        strip.placement = "outside")+
+  scale_colour_viridis(discrete=TRUE)+
+  annotate("rect", xmin = as.Date("2019-07-01"), xmax = as.Date("2019-12-31"),
+           ymin = -Inf, ymax = Inf,
+           alpha = 0.07, fill="blue") +
+  annotate("rect", xmin = as.Date("2020-07-01"), xmax = as.Date("2020-07-31"),
+           ymin = -Inf, ymax = Inf,
+           alpha = 0.07, fill="blue")
+
+ed
+```
+
+```{r save_plot, include=FALSE}
+ggsave("docs/figure_temporal.tiff", ed, device="tiff", 
+       width = 210, height = 297*0.9, units="mm", dpi=500)
+```
+
+``` {r plot_data_means, echo=FALSE, fig.width = 5, fig.height = 6}
+
+## FORMAT MODEL PLOT DATA ---
+enviro_model_long <- enviro_mm %>%
+  na.omit() %>%
+  ## select columns you want
+  select(month_year, 
+         absolute_no_detects, 
+         mean_precipitation, 
+         mean_water_temp, 
+         mean_wind_direction, 
+         mean_wind_speed, 
+         mean_salinity_2, 
+         mean_velocity_u_4, 
+         mean_velocity_v_8,
+         mean_green_red) %>%
+  cbind(., select(enviro_mmmm_less_less, max_atmospheric_press)) %>%
+  ## gather data
+  gather(., key="variable", value="value",
+         -month_year) %>%
+    mutate(variable_label = gsub("max_atmospheric_press", "Max atmospheric\npress. (hPa)", variable) %>%
+           gsub("mean_green_red", "Mean turbidity\n(green:red)", .) %>%
+           gsub("mean_precipitation", "Mean precipitation\n(mm)", .) %>%
+           gsub("mean_salinity_2", "Mean salinity\n(psu)", .) %>%
+           gsub("mean_velocity_u_4", "Mean ewd water\nvelocity (m/s)", .) %>%
+           gsub("mean_velocity_v_8", "Mean nwd water\nvelocity (m/s)", .) %>%
+           gsub("mean_water_temp", "Mean water temp.\n(°C)", .) %>%
+           gsub("mean_wind_direction", "Mean wind dir.\n(°)", .) %>%
+           gsub("mean_wind_speed", "Mean wind speed\n(m/s)", .)  %>%
+           gsub("absolute_no_detects", "Total eDNA\ndetections", .)) %>%
+  mutate(variable_label = 
+           factor(variable_label, 
+                  levels=c("Total eDNA\ndetections", "Mean turbidity\n(green:red)", 
+                           "Mean water temp.\n(°C)", "Mean salinity\n(psu)",  
+                            "Mean wind dir.\n(°)", "Mean wind speed\n(m/s)", 
+                            "Mean ewd water\nvelocity (m/s)", "Mean nwd water\nvelocity (m/s)",
+                            "Max atmospheric\npress. (hPa)", "Mean precipitation\n(mm)")))
+
+## PLOT ALL AS MODELLED ----
+edm<-ggplot(data=enviro_model_long, aes(month_year, y=value, colour=variable)) +
+  geom_line() +
+  geom_point(data=filter(enviro_model_long, variable == "absolute_no_detects"), 
+                         aes(month_year, y=value, colour=variable), 
+             shape=3, size=0.5)+
+  # facet_grid(variable ~., scales = "free")+
+  facet_wrap(~ variable_label, scales = "free_y", ncol = 1, 
+             strip.position = "left")+
+  ylab(NULL)+
+  xlab(NULL)+
+  # scale_x_date(date_breaks = "1 month", date_labels = "%b %Y")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank(),
+        legend.position = "none", 
+        strip.background = element_blank(), 
+        strip.placement = "outside")+
+  scale_colour_viridis(discrete=TRUE)
+
+edm
+```
+
+```{r save_means_plot, include=FALSE}
+ggsave("docs/supp_figure_temporal_means.tiff", edm, device="tiff", 
+       width = 210, height = 297*0.9, units="mm", dpi=500)
+```

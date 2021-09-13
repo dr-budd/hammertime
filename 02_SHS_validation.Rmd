@@ -1,0 +1,148 @@
+---
+title: "SHS survey results validation"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+current_directory <- dirname(rstudioapi::getActiveDocumentContext()$path)
+knitr::opts_knit$set(root.dir=normalizePath(paste(current_directory)))
+```
+
+```{r load_libraries, warning=FALSE, message=FALSE}
+## LOAD LIBRARIES ----
+library(gamlss) ## gamlss
+library(gamlss.dist) ## for BEINF
+library(zoo) ## as.yearmon
+library(tidyverse)
+```
+
+```{r import_and_format_data, warning=FALSE, message=FALSE}
+## IMPORT AND FORMAT DATA ----
+
+SHS_data_full<-read.csv("docs/01.0_SHS_data_full.csv")
+
+## edit data frame to contain sample info only
+SHS_data_sample <- SHS_data_full %>%
+  ## remove data that distinguishes technical replicates 
+  select(-c(plate, well_position, filter_half, target, Cq, quantity, positive_tech)) %>%
+  ## keep only unique rows (removes tech reps)
+  unique(.) %>%
+  ## remove blanks
+  filter(!grepl("_EB", sample) & !grepl("_EC", sample))
+
+## remove invalid data
+SHS_data_sample_less <- SHS_data_sample %>%
+  ## filter out invalid quantifluor concentration data
+  filter(concentration >= 0.125 & concentration <= 37.5) %>%
+  ## remove irrelevant info with NA values (important for na.omit) 
+  select(-c(latitude, longitude, depth_ft, water_temp_f))
+```
+
+```{r model_sample_data, warning=FALSE, message=FALSE, fig.height=3.5, fig.width=3.5}
+## MODEL SAMPLE DATA ----
+
+## from previous testing, the following model had the best AIC and diagnostics
+m3 <- gamlss(prop_tech_reps_ampd_per_sample ~ 
+               concentration + dCq,
+            family = BEINF, 
+            data = na.omit(SHS_data_sample_less)) ## because data contains NAs for dCqs
+summary(m3)
+par(mfrow = c(1,2))
+plot(m3)
+
+## term plots
+par(mfrow = c(2,2))
+term.plot(m3)
+```
+
+```{r enviro_relationships, warning = FALSE, message = FALSE}
+## MODEL ENVIRO DATA ----
+
+## create monthly means data frame for inhibition, concentration and filtration time
+SHS_data_site_less <- SHS_data_sample_less %>%
+  ## group by site-level info
+  group_by(field_collection_month) %>%
+  ## summarise
+  summarise(mean_dCq = mean(dCq, na.rm=TRUE), 
+            mean_concentration = mean(concentration, na.rm=TRUE))
+
+## import monthly means data
+SHS_enviro_mmmm <- read.csv("docs/03.1_SHS_enviro_mmmm.csv")
+
+## combine
+SHS_mmmm <- SHS_data_site_less %>%
+  rename(month_year = field_collection_month) %>%
+  left_join(., SHS_enviro_mmmm, by="month_year")
+
+## REPLICATE MAIN TEMPORAL MODEL WITH CONCENTRATION ---
+
+## m2, as is from temporal analysis
+m2 <- glm(absolute_no_detects ~  max_atmospheric_press + mean_water_temp + mean_wind_direction + mean_wind_speed + mean_velocity_v_8 + mean_green_red, 
+            data = SHS_mmmm)
+summary(m2)
+
+## m2, replace detections with concentration
+m2_c <- glm(mean_concentration ~  max_atmospheric_press + mean_water_temp + mean_wind_direction + mean_wind_speed + mean_velocity_v_8 + mean_green_red, 
+            data = SHS_mmmm)
+summary(m2_c)
+
+## m2, replace detections with inhibition
+m2_i <- glm(mean_dCq ~  max_atmospheric_press + mean_water_temp + mean_wind_direction + mean_wind_speed + mean_velocity_v_8 + mean_green_red, 
+            data = SHS_mmmm)
+summary(m2_i)
+```
+```{r build_table, warning=FALSE, message=FALSE}
+
+## create glm table ----
+
+m2_coeffs<-data.frame(summary(m2)$coefficients) %>%
+  ## round digits
+  mutate_if(is.numeric, round, digits = 4)  %>%
+  rownames_to_column(., var="Variable")
+m2_formula_row<-c(paste0("Formula: ", m2$call[2]), NA, NA, NA, NA, NA)
+m2_tab_part<-rbind(m2_formula_row, m2_coeffs)
+
+m2_c_coeffs<-data.frame(summary(m2_c)$coefficients) %>%
+  mutate_if(is.numeric, round, digits = 4)  %>%
+  rownames_to_column(., var="Variable")
+m2_c_formula_row<-c(paste0("Formula: ", m2_c$call[2]), NA, NA, NA, NA, NA)
+m2_c_tab_part<-rbind(m2_c_formula_row, m2_c_coeffs)
+
+# ## (removed because not discussed in text and all NS)
+# m2_i_coeffs<-data.frame(summary(m2_i)$coefficients) %>%
+#   mutate_if(is.numeric, round, digits = 4)  %>%
+#   rownames_to_column(., var="Variable")
+# m2_i_formula_row<-c(paste0("Formula: ", m2_i$call[2]), NA, NA, NA, NA, NA)
+# m2_i_tab_part<-rbind(m2_i_formula_row, m2_i_coeffs)
+
+enviro_mods_tab <- rbind(m2_tab_part, 
+                        # m2_i_tab_part,
+                        m2_c_tab_part) %>%
+  ## convert p-value to numeric
+  mutate(Pr...t.. = as.numeric(Pr...t..)) %>%
+  ## add significance codes
+  mutate(sig_code = ifelse(Pr...t.. <=0.001, "***",
+                       ifelse(Pr...t.. <=0.01, "**",
+                              ifelse(Pr...t.. <=0.05, "*",
+                                     ifelse(Pr...t.. <=0.1, ".", "(NS)"))))) %>%
+  ## rename columns
+  rename('Standard error' = Std..Error, 't-value' = t.value) %>%
+  ## edit p-value column
+  mutate('p-value' = paste(Pr...t.., sig_code, sep=" ")) %>%
+  ## remove columns
+  select(-Pr...t.., -sig_code) %>%
+  ## rename variables
+  mutate(Variable = gsub("max_atmospheric_press", "Max atmospheric pressure (atm)", Variable) %>%
+           gsub("mean_water_temp", "Mean water temp. (°C)", .) %>%
+           gsub("mean_wind_direction", "Mean wind dir. (°)", .) %>%
+           gsub("mean_wind_speed", "Mean wind speed (m/s)", .) %>%
+           gsub("mean_velocity_v_8", "Mean nwd water velocity (m/s)", .) %>%
+           gsub("mean_green_red", "Mean turbidity (as green:red)", .) %>%
+           gsub("mean_concentration", "Mean concentration (ng/µl)", .))
+
+## export it
+write.csv(enviro_mods_tab, "docs/02.1_enviro_mods_tab.csv", row.names=FALSE)
+
+```
