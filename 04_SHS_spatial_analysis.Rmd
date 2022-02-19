@@ -302,7 +302,7 @@ write.csv(spatial_data_full, "docs/04.0_spatial_data_full.csv", row.names=FALSE)
 ```
 
 ```{r sum_stats, warning=FALSE, message=FALSE, fig.width=7, fig.height=7}
-## create table and plot of summary statistics
+## create table and plot of summary statistics ----
 
 spatial_data_sum <- spatial_data_full %>%
    select(site_name, depth_m, mean_green_red, distance, Coral, Macroalgae, Turf, 
@@ -388,16 +388,15 @@ pca_plot<-ggbiplotme(pca_full,
   xlab("PC1 (54.3 % explained variance)")+
   ylab("PC2 (16.3 % explained variance)")+
   scale_colour_viridis(discrete="TRUE", 
-                       labels=c("Blue\nHole", "Inner\nHarbor", 
-                                "Middle\nShoals", "Orote\nPoint", "Sasa\nBay"))+
-  scale_fill_viridis(discrete="TRUE")+
+                       labels=c("Blue\nHole     ", "Inner\nHarbor     ", 
+                                "Middle\nShoals     ", "Orote\nPoint     ", "Sasa\nBay     "))+
   geom_point(aes(colour=pca_data_full$site_name), size=5, alpha=0.4)+
   theme_bw()+
   theme(legend.position = "bottom", 
         plot.margin=unit(c(0.5,0.2,0.75,0.4),"cm"))+ #TRBL
   guides(color=guide_legend("Site"))
 
-pca_plot
+# pca_plot
 ```
 
 ```{r RDA, fig.width=7, fig.height=6, warning=FALSE, message=FALSE}
@@ -560,7 +559,7 @@ structure_map <- ggmap(ApraHarbor) +
   theme(legend.position = "bottom", 
         panel.border = element_rect(colour = "black", fill=NA, size=0.5))
 
-structure_map
+# structure_map
 ```
 
 ```{r depth_data, warning = FALSE, message=FALSE}
@@ -574,7 +573,7 @@ structure_map
 ## try 10m data, cropped for region of interest
 depth_10m_guam <- raster("docs/ngdc_bathy_10m_guam_cropped.nc")
 
-## sp returns SpatialPolygonsDataFrame
+## sp returns SpatialPolygonsDataFrame 
 depth_10m_guam_qmrtpsp <- qm_rasterToPolygons_sp(depth_10m_guam, na.rm=TRUE)
 
 ## add id field (for geom_polygon)
@@ -618,7 +617,7 @@ depth_map <- ggmap(ApraHarbor) +
         panel.border = element_rect(colour = "black", 
                                     fill=NA, size=0.5))
 
-depth_map
+# depth_map
 ```
 
 ```{r combine_plots, warning=FALSE, message=FALSE, fig.height=9.4, fig.width=9.9}
@@ -637,7 +636,7 @@ figure_spatial
 Based on overly simplistic but full-coverage PacIOOS data for major reef structure, major biological cover and depth in Apra Harbor, as well as senitnel 2 data for turbidity and the distance of each sampling point to the harbor entrance, sampling points in our key SHS sites (Sasa Bay; yellow, Inner Harbor; blue) are characterised by sediment as the major reef structure, uncolonised biological cover or (for sasa bay) macroalgae, high turbidity, shallow depths and large distances from the harbor entrance.
 
 ```{r save_plot, include=FALSE}
-ggsave("docs/figure_spatial.tiff", figure_spatial, device="tiff", 
+ggsave("docs/figure_spatial_2.tiff", figure_spatial, device="tiff", 
        width = 210*1.2, height = 297*0.8, units="mm", dpi = 500)
 ```
 

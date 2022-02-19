@@ -251,7 +251,8 @@ map1.0 <- ggmap(ApraHarbor, extent = "panel") +
         panel.border = element_rect(colour = "gray30", fill = NA),
         strip.text.x = element_text(margin = margin(0.1, 0, 0.1, 0, "cm"))) +
   ## make it colour blind friendly
-  scale_fill_viridis(discrete=TRUE) +
+  scale_fill_viridis(discrete=TRUE)+ 
+  #                   labels = c("")) +
   ## edit legend appearance
   guides(fill = guide_legend(override.aes = list(shape = 21,
                                                  size = 5), 
