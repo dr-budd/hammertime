@@ -12,9 +12,9 @@ knitr::opts_knit$set(root.dir=normalizePath(paste(current_directory)))
 
 ```{r load_libraries, warning=FALSE, message=FALSE}
 ## LOAD LIBRARIES ----
-library(gamlss) ## gamlss
-library(gamlss.dist) ## for BEINF
-library(zoo) ## as.yearmon
+library(gamlss) 
+library(gamlss.dist) 
+library(zoo) 
 library(tidyverse)
 ```
 
@@ -144,5 +144,7 @@ enviro_mods_tab <- rbind(m2_tab_part,
 
 ## export it
 write.csv(enviro_mods_tab, "docs/02.1_enviro_mods_tab.csv", row.names=FALSE)
+
+## END SCRIPT
 
 ```

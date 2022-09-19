@@ -28,6 +28,11 @@ library(ggpubr) ## ggarrange
 library(tidyverse) ## load last
 ```
 
+```{r}
+## NOTE: provde ggmap with your key
+# register_google(key = "[your key here]")
+```
+
 
 ```{r SHS_survey_data, warning = FALSE, message = FALSE}
 ## IMPORT SHS SURVEY DATA ----

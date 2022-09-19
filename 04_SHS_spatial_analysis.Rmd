@@ -638,5 +638,7 @@ Based on overly simplistic but full-coverage PacIOOS data for major reef structu
 ```{r save_plot, include=FALSE}
 ggsave("docs/figure_spatial_2.tiff", figure_spatial, device="tiff", 
        width = 210*1.2, height = 297*0.8, units="mm", dpi = 500)
+
+## END SCRIPT
 ```
 

@@ -907,4 +907,6 @@ edm
 ```{r save_means_plot, include=FALSE}
 ggsave("docs/supp_figure_temporal_means.tiff", edm, device="tiff", 
        width = 210, height = 297*0.9, units="mm", dpi=500)
+
+## END SCRIPT
 ```
