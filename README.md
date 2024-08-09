@@ -28,7 +28,7 @@ The required data is in `docs`
 Alyssa Budd (alyssa.budd@my.jcu.edu.au)
 
 ## :bouquet: Acknowledgements
-Scripts were developed in collaboration with Queensland Facility for Advanced Bioinformatics (QFAB). Specifically, Mike Thang wrote the original code for WGBS methlylation calling and Anne Bernard drafted the code for running multiple comparisons between treatments for the RNAseq count data.
+Special thanks to publication co-author Mitchell Lyons for his help with the generalized additive models (GAMs).
 
 ## :copyright: License
 This project is licensed under the GNU General Public License - see the [LICENSE](LICENSE.txt) file for details.
