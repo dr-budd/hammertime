@@ -24,11 +24,13 @@ The code is separated into the following R markdown scripts that should be run i
 
 The required data is in `docs`
 
+If you would like to obtain the remote sensing data sets yourself (via Google Earth Engine), the JavaScript code to do so can be found in `00_remote_sensing_data`
+
 ## :woman_technologist: Author
 Alyssa Budd (alyssa.budd@my.jcu.edu.au)
 
 ## :bouquet: Acknowledgements
-Special thanks to publication co-author Mitchell Lyons for his help with the generalized additive models (GAMs).
+Special thanks to publication co-author Mitchell Lyons for his help with the generalized additive models (GAMs) and obtaining the remote sensing data.
 
 ## :copyright: License
 This project is licensed under the GNU General Public License - see the [LICENSE](LICENSE.txt) file for details.
